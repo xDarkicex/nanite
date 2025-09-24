@@ -98,11 +98,46 @@ type RadixNode struct {
 	wildcardName  string
 }
 
+type RouterGroup struct {
+	prefix     string
+	parent     *Router
+	middleware []MiddlewareFunc
+}
+
+func (g *RouterGroup) Use(middleware ...MiddlewareFunc) *RouterGroup {
+	g.middleware = append(g.middleware, middleware...)
+	return g
+}
+
+func (g *RouterGroup) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+	fullPath := g.prefix + path
+	g.parent.addRoute("GET", fullPath, handler, append(g.middleware, middleware...)...)
+	return g
+}
+
+func (g *RouterGroup) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+	fullPath := g.prefix + path
+	g.parent.addRoute("POST", fullPath, handler, append(g.middleware, middleware...)...)
+	return g
+}
+
+func (g *RouterGroup) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+	fullPath := g.prefix + path
+	g.parent.addRoute("PUT", fullPath, handler, append(g.middleware, middleware...)...)
+	return g
+}
+
+func (g *RouterGroup) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+	fullPath := g.prefix + path
+	g.parent.addRoute("DELETE", fullPath, handler, append(g.middleware, middleware...)...)
+	return g
+}
+
 type Router struct {
 	staticRoutes    map[string]map[string]staticRoute
 	trees           map[string]*RadixNode
 	routeCache      *LRUCache
-	pool            sync.Pool
+	Pool            sync.Pool // Exported for testing
 	middleware      []MiddlewareFunc
 	errorMiddleware []ErrorMiddlewareFunc
 	config          *Config
@@ -110,6 +145,7 @@ type Router struct {
 	server          *http.Server
 	shutdownHooks   []ShutdownHook
 	mutex           sync.RWMutex
+	groups          map[string]*RouterGroup
 }
 type ShutdownHook func() error
 
@@ -117,6 +153,7 @@ func New() *Router {
 	r := &Router{
 		trees:        make(map[string]*RadixNode),
 		staticRoutes: make(map[string]map[string]staticRoute),
+		groups:       make(map[string]*RouterGroup),
 		config: &Config{
 			WebSocket: &WebSocketConfig{
 				ReadTimeout:    60 * time.Second,
@@ -145,7 +182,7 @@ func New() *Router {
 	}
 
 	// Context pool with memory-efficient initialization
-	r.pool.New = func() interface{} {
+	r.Pool.New = func() interface{} {
 		return &Context{
 			Params:     [10]Param{},                     // Pre-allocated parameter array
 			Values:     make(map[string]interface{}, 8), // Common case: 8-12 context values
@@ -395,7 +432,7 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 	}
 }
 
-func (r *Router) findHandlerAndMiddleware(method, path string) (HandlerFunc, []Param) {
+func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []Param) { // Exported for testing
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -456,12 +493,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	bufferedWriter := newBufferedResponseWriter(trackedWriter, contentType, r.config)
 	defer bufferedWriter.Close()
 	// Get a context from the pool and initialize it with a single Reset call
-	ctx := r.pool.Get().(*Context)
+	ctx := r.Pool.Get().(*Context)
 	ctx.Reset(bufferedWriter, req)
 	// Ensure context is returned to pool when done
 	defer func() {
 		ctx.CleanupPooledResources()
-		r.pool.Put(ctx)
+		r.Pool.Put(ctx)
 	}()
 	// Set up context cancellation monitoring
 	reqCtx := req.Context()
@@ -486,7 +523,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Route lookup: find the appropriate handler and parameters
-	handler, params := r.findHandlerAndMiddleware(req.Method, req.URL.Path)
+	handler, params := r.FindHandlerAndMiddleware(req.Method, req.URL.Path)
 	var safeParams []Param
 	if len(params) > 0 {
 		safeParams = make([]Param, len(params))
@@ -549,11 +586,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}()
 
-	// Execute the middleware chain with the final handler
-	// Using direct middleware reference without cloning for better performance
-	r.mutex.RLock()
-	executeMiddlewareChain(ctx, handler, r.middleware)
-	r.mutex.RUnlock()
+	// Execute the wrapped handler (already includes all middleware)
+	handler(ctx)
 
 	// Check if the context contains an error to be handled by error middleware
 	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
