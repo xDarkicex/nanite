@@ -281,6 +281,26 @@ r.Use(nanitequic.AltSvcNaniteMiddleware(nanitequic.AltSvcConfig{
 }))
 ```
 
+TLS helpers:
+
+```go
+// Early cert/key path validation
+if err := nanitequic.ValidateTLSFiles("server.crt", "server.key"); err != nil {
+    panic(err)
+}
+
+// Optional: build reusable tls.Config for HTTP/3
+tlsCfg, err := nanitequic.LoadTLSConfig("server.crt", "server.key", nil)
+if err != nil {
+    panic(err)
+}
+
+qs := nanitequic.New(r, nanitequic.Config{
+    Addr:      ":8443",
+    TLSConfig: tlsCfg, // uses ListenAndServe with this config
+})
+```
+
 ## Static Files
 
 ```go

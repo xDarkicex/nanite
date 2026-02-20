@@ -2,6 +2,7 @@ package quic
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,8 @@ type Config struct {
 
 	CertFile string
 	KeyFile  string
+	// Optional prebuilt TLS config. When set, CertFile/KeyFile are ignored.
+	TLSConfig *tls.Config
 
 	// Optional HTTP/1.1 and HTTP/2 fallback address for dual-stack mode.
 	HTTP1Addr string
@@ -65,8 +68,9 @@ func New(handler http.Handler, cfg Config) *Server {
 	}
 
 	s.h3 = &http3.Server{
-		Addr:    cfg.Addr,
-		Handler: handler,
+		Addr:      cfg.Addr,
+		Handler:   handler,
+		TLSConfig: cfg.TLSConfig,
 	}
 
 	if cfg.HTTP1Addr != "" {
@@ -84,8 +88,11 @@ func New(handler http.Handler, cfg Config) *Server {
 
 // StartHTTP3 starts only the HTTP/3 listener.
 func (s *Server) StartHTTP3() error {
-	if s.cfg.CertFile == "" || s.cfg.KeyFile == "" {
-		return errors.New("quic: CertFile and KeyFile are required")
+	if s.cfg.TLSConfig != nil {
+		return s.h3.ListenAndServe()
+	}
+	if err := ValidateTLSFiles(s.cfg.CertFile, s.cfg.KeyFile); err != nil {
+		return err
 	}
 	return s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
 }
@@ -101,9 +108,6 @@ func (s *Server) StartDualAndServe() error {
 	if s.h1 == nil {
 		return errors.New("quic: HTTP1Addr is required for dual-stack mode")
 	}
-	if s.cfg.CertFile == "" || s.cfg.KeyFile == "" {
-		return errors.New("quic: CertFile and KeyFile are required")
-	}
 
 	errCh := make(chan error, 2)
 
@@ -117,7 +121,7 @@ func (s *Server) StartDualAndServe() error {
 	}()
 
 	go func() {
-		err := s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+		err := s.StartHTTP3()
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			errCh <- nil
 			return
