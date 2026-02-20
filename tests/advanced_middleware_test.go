@@ -22,15 +22,17 @@ func TestDynamicMiddlewareBehavior(t *testing.T) {
 
 	r.Use(func(c *nanite.Context, next func()) {
 		// Another middleware that depends on previous middleware
-		if admin, ok := c.Get("admin-access").(bool); ok && admin {
-			c.Set("admin-level", "high")
+		if adminRaw, exists := c.Get("admin-access"); exists {
+			if admin, ok := adminRaw.(bool); ok && admin {
+				c.Set("admin-level", "high")
+			}
 		}
 		next()
 	})
 
 	r.Get("/admin", func(c *nanite.Context) {
-		adminVal := c.Get("admin-access")
-		levelVal := c.Get("admin-level")
+		adminVal, _ := c.Get("admin-access")
+		levelVal, _ := c.Get("admin-level")
 		if admin, ok := adminVal.(bool); !ok || !admin {
 			t.Errorf("Admin access not set correctly")
 		}
@@ -115,8 +117,10 @@ func TestMiddlewareOrderAndDependency(t *testing.T) {
 
 	r.Use(func(c *nanite.Context, next func()) {
 		executionOrder = append(executionOrder, "MW2-Enter")
-		if step, ok := c.Get("step").(int); ok && step != 1 {
-			t.Errorf("Middleware execution order is wrong, expected step 1, got %d", step)
+		if raw, exists := c.Get("step"); exists {
+			if step, ok := raw.(int); ok && step != 1 {
+				t.Errorf("Middleware execution order is wrong, expected step 1, got %d", step)
+			}
 		}
 		c.Set("step", 2)
 		next()
@@ -125,8 +129,10 @@ func TestMiddlewareOrderAndDependency(t *testing.T) {
 
 	r.Use(func(c *nanite.Context, next func()) {
 		executionOrder = append(executionOrder, "MW3-Enter")
-		if step, ok := c.Get("step").(int); ok && step != 2 {
-			t.Errorf("Middleware execution order is wrong, expected step 2, got %d", step)
+		if raw, exists := c.Get("step"); exists {
+			if step, ok := raw.(int); ok && step != 2 {
+				t.Errorf("Middleware execution order is wrong, expected step 2, got %d", step)
+			}
 		}
 		c.Set("step", 3)
 		next()
@@ -135,8 +141,10 @@ func TestMiddlewareOrderAndDependency(t *testing.T) {
 
 	r.Get("/test", func(c *nanite.Context) {
 		executionOrder = append(executionOrder, "Handler")
-		if step, ok := c.Get("step").(int); ok && step != 3 {
-			t.Errorf("Final step should be 3, got %d", step)
+		if raw, exists := c.Get("step"); exists {
+			if step, ok := raw.(int); ok && step != 3 {
+				t.Errorf("Final step should be 3, got %d", step)
+			}
 		}
 		c.String(http.StatusOK, "OK")
 	})

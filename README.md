@@ -8,21 +8,28 @@ Nanite is a lightweight, high-performance HTTP router for Go. It's designed to b
 
 ## Performance
 
-Nanite is engineered for extreme performance without sacrificing developer experience:
+Latest microbench results from this repo (`go test ./benchmark -benchmem`, Apple M2, Go 1.25.1):
 
-- **Blazing Fast**: Benchmarked at 190,000+ requests/sec on standard hardware
-- **Memory Efficient**: Dramatically reduced allocations through smart pooling techniques
-- **Low Latency**: Average response times under 1ms with consistent performance
-- **GC Friendly**: Minimized garbage collection pressure through zero-allocation algorithms
+### net/http comparison benchmark
 
-Here's how it compares to other popular routers:
+| Framework | Static ns/op | Static allocs/op | Param ns/op | Param allocs/op |
+|-----------|--------------|------------------|-------------|-----------------|
+| Nanite | ~654 | 0 | ~491 | 0 |
+| httprouter | ~159 | 0 | ~259 | 5 |
+| chi | ~1136 | 16 | ~1361 | 20 |
+| gorilla/mux | ~3452 | 56 | ~3577 | 40 |
+| fiber (via net/http adaptor) | ~7010 | 152 | ~4910 | 95 |
 
-| Router      | Requests/sec | Latency (avg) | Allocations/req |
-|-------------|--------------|---------------|-----------------|
-| Nanite      | 190,000      | 0.88ms        | 5-10            |
-| Gin         | 130,000      | 0.15ms        | 5               |
-| Echo        | 125,000      | 0.13ms        | 4               |
-| Gorilla Mux | 45,000       | 0.32ms        | 10              |
+### Native Nanite vs Native Fiber benchmark
+
+| Framework | Static ns/op | Static allocs/op | Param ns/op | Param allocs/op |
+|-----------|--------------|------------------|-------------|-----------------|
+| Nanite | ~653 | 0 | ~549 | 0 |
+| Fiber (native) | ~2220 | 8 | ~1801 | 5 |
+
+Notes:
+- These are in-process microbenchmarks, not external load tests.
+- Adapter-based fiber numbers include net/http adapter overhead.
 
 ## Features
 
@@ -31,7 +38,7 @@ Here's how it compares to other popular routers:
 - 🔄 **Buffered Response Writer**: Optimized I/O operations for improved throughput
 - 🧩 **Express-Like Middleware**: Intuitive middleware system with support for global and route-specific handlers
 - ✅ **Optimized Validation**: High-performance request validation with pre-allocated errors
-- 🔌 **WebSockets**: First-class WebSocket support with automatic ping/pong
+- 🔌 **WebSockets (Optional Package)**: Use `github.com/xDarkicex/nanite/websocket` for WebSocket routes
 - 📁 **Static File Serving**: Efficient static file delivery with buffered I/O
 - 🌳 **Route Groups**: Organize routes with shared prefixes and middleware
 - 🛡️ **Object Pooling**: Extensive use of sync.Pool to minimize allocations
@@ -39,7 +46,7 @@ Here's how it compares to other popular routers:
 ## Installation
 
 ```bash
-go get github.com/xDarkicex/Nanite
+go get github.com/xDarkicex/nanite
 ```
 
 ## Quick Start
@@ -50,13 +57,20 @@ package main
 import (
     "fmt"
     "net/http"
+    "time"
     
-    "github.com/xDarkicex/Nanite"
+    "github.com/xDarkicex/nanite"
 )
 
 func main() {
-    // Create a new router
-    r := nanite.New()
+    // Create a new router with opinionated defaults.
+    // All knobs are overridable with With... options.
+    r := nanite.New(
+        nanite.WithPanicRecovery(true),
+        nanite.WithServerTimeouts(5*time.Second, 60*time.Second, 60*time.Second),
+        nanite.WithRouteCacheOptions(1024, 10),
+        nanite.WithRouteCacheTuning(4, 8),
+    )
     
     // Add a simple route
     r.Get("/hello", func(c *nanite.Context) {
@@ -66,6 +80,21 @@ func main() {
     // Start the server
     r.Start("8080")
 }
+```
+
+## Programmatic Configuration
+
+Nanite exposes functional options for power users while keeping default behavior opinionated.
+
+```go
+r := nanite.New(
+    nanite.WithPanicRecovery(false),
+    nanite.WithRouteCacheOptions(2048, 10),
+    nanite.WithRouteCacheTuning(8, 16),
+    nanite.WithServerTimeouts(3*time.Second, 30*time.Second, 30*time.Second),
+    nanite.WithServerMaxHeaderBytes(1<<20),
+    nanite.WithTCPBufferSizes(65536, 65536),
+)
 ```
 
 ## Routing with Radix Tree
@@ -122,6 +151,21 @@ func LoggerMiddleware(c *nanite.Context, next func()) {
 }
 ```
 
+## Built-in CORS Middleware
+
+Nanite includes `CORSMiddleware` with proper preflight short-circuit behavior (`OPTIONS` preflight returns `204` and does not continue the chain).
+
+```go
+r.Use(nanite.CORSMiddleware(&nanite.CORSConfig{
+    AllowOrigins:     []string{"https://app.example.com"},
+    AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+    AllowHeaders:     []string{"Content-Type", "Authorization"},
+    ExposeHeaders:    []string{"X-Request-ID"},
+    AllowCredentials: true,
+    MaxAge:           600,
+}))
+```
+
 ## High-Performance Validation
 
 Nanite provides an optimized validation system:
@@ -150,18 +194,21 @@ func registerHandler(c *nanite.Context) {
 
 ## WebSockets
 
-WebSocket support is built into Nanite:
+WebSocket support is provided by the optional `nanite/websocket` package:
 
 ```go
-r.WebSocket("/chat", func(conn *websocket.Conn, c *nanite.Context) {
-    // Handle the WebSocket connection
+import (
+    "github.com/xDarkicex/nanite"
+    nanitews "github.com/xDarkicex/nanite/websocket"
+    "github.com/gorilla/websocket"
+)
+
+nanitews.Register(r, "/chat", func(conn *websocket.Conn, c *nanite.Context) {
     for {
         messageType, p, err := conn.ReadMessage()
         if err != nil {
             return
         }
-        
-        // Echo the message back
         if err := conn.WriteMessage(messageType, p); err != nil {
             return
         }
@@ -203,7 +250,10 @@ c.Cookie("session", token)
 
 // Context data
 c.Set("user", user)
-c.Get("user")
+if v, ok := c.Get("user"); ok {
+    _ = v
+}
+c.GetValue("user") // compatibility one-value accessor
 ```
 
 ## Route Groups
@@ -240,7 +290,7 @@ Nanite is actively being enhanced through a 3-phase development plan:
 ### Phase 3: Advanced Features (Planned)
 - 🔮 Fluent API for middleware chaining
 - 🔮 Named routes and reverse routing for URL generation
-- 🔮 Built-in security middleware (CORS, CSRF, etc.)
+- 🔮 Additional built-in security middleware (CSRF, rate limiting, etc.)
 - 🔮 Enhanced parameter handling for complex routes
 - 🔮 Request rate limiting
 
@@ -255,7 +305,7 @@ import (
     "log"
     "net/http"
     
-    "github.com/xDarkicex/Nanite"
+    "github.com/xDarkicex/nanite"
 )
 
 type User struct {

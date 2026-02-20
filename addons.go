@@ -83,13 +83,6 @@ func (g *Group) Handle(method, path string, handler HandlerFunc, middleware ...M
 	return g
 }
 
-func (g *Group) WebSocket(path string, handler WebSocketHandler, middleware ...MiddlewareFunc) *Group {
-	fullPath := normalizePath(g.prefix + path)
-	allMiddleware := append(g.middleware, middleware...)
-	g.router.WebSocket(fullPath, handler, allMiddleware...)
-	return g
-}
-
 func (g *Group) Group(prefix string, middleware ...MiddlewareFunc) *Group {
 	fullPrefix := normalizePath(g.prefix + prefix)
 	allMiddleware := append(g.middleware, middleware...)
@@ -442,14 +435,14 @@ type entry struct {
 }
 
 type lruShard struct {
-	capacity int
+	capacity  int
 	maxParams int
-	mutex    sync.RWMutex
-	entries  []entry
-	head     int
-	tail     int
-	hits     int64
-	misses   int64
+	mutex     sync.RWMutex
+	entries   []entry
+	head      int
+	tail      int
+	hits      int64
+	misses    int64
 
 	getIndices     map[string]int
 	postIndices    map[string]int
@@ -908,6 +901,10 @@ func (r *Router) SetRouteCacheTuning(promoteEvery, minDynamicRoutes int) {
 		minDynamicRoutes = 0
 	}
 	r.routeCacheMinDynamicRoutes = minDynamicRoutes
+	if r.config != nil {
+		r.config.RouteCacheMinDyn = minDynamicRoutes
+		r.config.RouteCachePromote = uint32(promoteEvery)
+	}
 
 	if r.routeCache != nil {
 		r.routeCache.SetPromoteEvery(uint32(promoteEvery))

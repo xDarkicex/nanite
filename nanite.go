@@ -11,15 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type ErrorMiddlewareFunc func(err error, ctx *Context, next func())
 
 type HandlerFunc func(*Context)
-
-type WebSocketHandler func(*websocket.Conn, *Context)
 
 type MiddlewareFunc func(*Context, func())
 
@@ -95,26 +91,23 @@ func (ve ValidationErrors) Error() string {
 // ### Router Configuration
 
 type Config struct {
-	NotFoundHandler   HandlerFunc
-	ErrorHandler      func(*Context, error)
-	RecoverPanics     bool
-	Upgrader          *websocket.Upgrader
-	WebSocket         *WebSocketConfig
-	RouteCacheSize    int
-	RouteMaxParams    int
-	DefaultBufferSize int
-	TextBufferSize    int
-	BinaryBufferSize  int
-	AdaptiveBuffering bool
-}
-
-type WebSocketConfig struct {
-	ReadTimeout    time.Duration // Timeout for reading messages
-	WriteTimeout   time.Duration // Timeout for writing messages
-	PingInterval   time.Duration // Interval for sending pings
-	MaxMessageSize int64         // Maximum message size in bytes
-	BufferSize     int           // Buffer size for read/write operations
-	AllowedOrigins []string      // List of allowed origin patterns (empty means same-origin only)
+	NotFoundHandler      HandlerFunc
+	ErrorHandler         func(*Context, error)
+	RecoverPanics        bool
+	RouteCacheSize       int
+	RouteMaxParams       int
+	RouteCachePromote    uint32
+	RouteCacheMinDyn     int
+	DefaultBufferSize    int
+	TextBufferSize       int
+	BinaryBufferSize     int
+	AdaptiveBuffering    bool
+	ServerReadTimeout    time.Duration
+	ServerWriteTimeout   time.Duration
+	ServerIdleTimeout    time.Duration
+	ServerMaxHeaderBytes int
+	TCPReadBuffer        int
+	TCPWriteBuffer       int
 }
 
 type staticRoute struct {
@@ -191,23 +184,24 @@ type Router struct {
 }
 type ShutdownHook func() error
 
-func New() *Router {
+func New(opts ...Option) *Router {
 	r := &Router{
 		trees:         make(map[string]*RadixNode),
 		staticRoutes:  make(map[string]map[string]staticRoute),
 		dynamicCounts: make(map[string]int),
 		groups:        make(map[string]*RouterGroup),
 		config: &Config{
-			RecoverPanics: true,
-			WebSocket: &WebSocketConfig{
-				ReadTimeout:    60 * time.Second,
-				WriteTimeout:   10 * time.Second,
-				PingInterval:   30 * time.Second,
-				MaxMessageSize: 1024 * 1024, // 1MB
-				BufferSize:     4096,
-			},
-			RouteCacheSize: 1024, // Default cache size
-			RouteMaxParams: 10,   // Default max params
+			RecoverPanics:        true,
+			RouteCacheSize:       1024, // Default cache size
+			RouteMaxParams:       10,   // Default max params
+			RouteCachePromote:    4,
+			RouteCacheMinDyn:     8,
+			ServerReadTimeout:    5 * time.Second,
+			ServerWriteTimeout:   60 * time.Second,
+			ServerIdleTimeout:    60 * time.Second,
+			ServerMaxHeaderBytes: 1 << 20,
+			TCPReadBuffer:        65536,
+			TCPWriteBuffer:       65536,
 		},
 		httpClient: &http.Client{
 			Transport: &http.Transport{
@@ -258,92 +252,64 @@ func New() *Router {
 		return ctx
 	}
 
-	// WebSocket configuration with secure defaults
-	r.config.Upgrader = &websocket.Upgrader{
-		CheckOrigin:     r.websocketCheckOrigin,
-		ReadBufferSize:  r.config.WebSocket.BufferSize,
-		WriteBufferSize: r.config.WebSocket.BufferSize,
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
 	}
 
-	// Route cache optimized for high locality workloads
-	r.routeCache = NewLRUCache(r.config.RouteCacheSize, r.config.RouteMaxParams)
+	r.ensureConfigDefaults()
 
 	return r
 }
 
-// websocketCheckOrigin validates WebSocket origin headers for security.
-// Empty AllowedOrigins means same-origin only. Patterns support * wildcards.
-func (r *Router) websocketCheckOrigin(req *http.Request) bool {
-	origin := req.Header.Get("Origin")
-	host := req.Host
-
-	// If no origin header, allow (same-origin request)
-	if origin == "" {
-		return true
+func (r *Router) ensureConfigDefaults() {
+	if r.config == nil {
+		r.config = &Config{}
 	}
 
-	// If AllowedOrigins is configured, check against the list
-	if len(r.config.WebSocket.AllowedOrigins) > 0 {
-		for _, allowed := range r.config.WebSocket.AllowedOrigins {
-			if r.originMatches(origin, allowed) {
-				return true
-			}
-		}
-		return false
+	if r.config.RouteCacheSize == 0 {
+		r.config.RouteCacheSize = 1024
+	}
+	if r.config.RouteMaxParams == 0 {
+		r.config.RouteMaxParams = 10
+	}
+	if r.config.RouteCachePromote == 0 {
+		r.config.RouteCachePromote = 4
+	}
+	if r.config.RouteCacheMinDyn < 0 {
+		r.config.RouteCacheMinDyn = 0
+	}
+	if r.config.RouteCacheMinDyn == 0 {
+		r.config.RouteCacheMinDyn = 8
+	}
+	if r.config.ServerReadTimeout == 0 {
+		r.config.ServerReadTimeout = 5 * time.Second
+	}
+	if r.config.ServerWriteTimeout == 0 {
+		r.config.ServerWriteTimeout = 60 * time.Second
+	}
+	if r.config.ServerIdleTimeout == 0 {
+		r.config.ServerIdleTimeout = 60 * time.Second
+	}
+	if r.config.ServerMaxHeaderBytes == 0 {
+		r.config.ServerMaxHeaderBytes = 1 << 20
+	}
+	if r.config.TCPReadBuffer == 0 {
+		r.config.TCPReadBuffer = 65536
+	}
+	if r.config.TCPWriteBuffer == 0 {
+		r.config.TCPWriteBuffer = 65536
 	}
 
-	// Default: allow if origin matches host (same-origin protection)
-	return origin == "http://"+host || origin == "https://"+host
-}
-
-// originMatches checks if an origin matches an allowed pattern with * wildcard support
-func (r *Router) originMatches(origin, pattern string) bool {
-	// Handle * wildcard patterns
-	if strings.Contains(pattern, "*") {
-		return r.matchWildcard(origin, pattern)
+	// Route cache optimized for high locality workloads
+	if r.config.RouteCacheSize <= 0 {
+		r.routeCache = nil
+	} else {
+		r.routeCache = NewLRUCache(r.config.RouteCacheSize, r.config.RouteMaxParams)
+		r.routeCache.SetPromoteEvery(r.config.RouteCachePromote)
 	}
-	return origin == pattern
-}
-
-// matchWildcard performs wildcard matching for origin patterns
-func (r *Router) matchWildcard(origin, pattern string) bool {
-	origins := strings.Split(origin, "://")
-	patterns := strings.Split(pattern, "://")
-
-	if len(origins) != 2 || len(patterns) != 2 {
-		return false
-	}
-
-	// Check scheme
-	if patterns[0] != "*" && origins[0] != patterns[0] {
-		return false
-	}
-
-	// Check host with wildcard
-	return r.matchHostWildcard(origins[1], patterns[1])
-}
-
-// matchHostWildcard matches host patterns with * wildcards
-func (r *Router) matchHostWildcard(host, pattern string) bool {
-	if pattern == "*" {
-		return true
-	}
-
-	// Handle multiple wildcards
-	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
-		mid := strings.TrimSuffix(strings.TrimPrefix(pattern, "*"), "*")
-		return strings.Contains(host, mid)
-	}
-
-	if strings.HasPrefix(pattern, "*") {
-		return strings.HasSuffix(host, strings.TrimPrefix(pattern, "*"))
-	}
-
-	if strings.HasSuffix(pattern, "*") {
-		return strings.HasPrefix(host, strings.TrimSuffix(pattern, "*"))
-	}
-
-	return host == pattern
+	r.routeCacheMinDynamicRoutes = r.config.RouteCacheMinDyn
 }
 
 func (r *Router) Use(middleware ...MiddlewareFunc) {
@@ -398,19 +364,24 @@ func (r *Router) Start(port string) error {
 		r.mutex.Unlock()
 		return fmt.Errorf("server already running")
 	}
+	r.ensureConfigDefaults()
 	r.server = &http.Server{
 		Addr:           ":" + port,
 		Handler:        r,
-		ReadTimeout:    5 * time.Second,
-		WriteTimeout:   60 * time.Second,
-		IdleTimeout:    60 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1MB
+		ReadTimeout:    r.config.ServerReadTimeout,
+		WriteTimeout:   r.config.ServerWriteTimeout,
+		IdleTimeout:    r.config.ServerIdleTimeout,
+		MaxHeaderBytes: r.config.ServerMaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			if state == http.StateNew {
 				tcpConn, ok := conn.(*net.TCPConn)
 				if ok {
-					tcpConn.SetReadBuffer(65536)
-					tcpConn.SetWriteBuffer(65536)
+					if r.config.TCPReadBuffer > 0 {
+						_ = tcpConn.SetReadBuffer(r.config.TCPReadBuffer)
+					}
+					if r.config.TCPWriteBuffer > 0 {
+						_ = tcpConn.SetWriteBuffer(r.config.TCPWriteBuffer)
+					}
 				}
 			}
 		},
@@ -438,14 +409,15 @@ func (r *Router) StartTLS(port, certFile, keyFile string) error {
 		r.mutex.Unlock()
 		return fmt.Errorf("server already running")
 	}
+	r.ensureConfigDefaults()
 
 	r.server = &http.Server{
 		Addr:           ":" + port,
 		Handler:        r,
-		ReadTimeout:    5 * time.Second,
-		WriteTimeout:   5 * time.Second,
-		IdleTimeout:    60 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+		ReadTimeout:    r.config.ServerReadTimeout,
+		WriteTimeout:   r.config.ServerWriteTimeout,
+		IdleTimeout:    r.config.ServerIdleTimeout,
+		MaxHeaderBytes: r.config.ServerMaxHeaderBytes,
 	}
 	r.mutex.Unlock()
 	err := r.server.ListenAndServeTLS(certFile, keyFile)
@@ -495,11 +467,6 @@ func (r *Router) ShutdownImmediate() error {
 
 	// Close immediately
 	return server.Close()
-}
-
-func (r *Router) WebSocket(path string, handler WebSocketHandler, middleware ...MiddlewareFunc) *Router {
-	r.addRoute("GET", path, r.wrapWebSocketHandler(handler), middleware...)
-	return r
 }
 
 func (r *Router) ServeStatic(prefix, root string) *Router {
@@ -863,67 +830,41 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 	if len(path) > 0 {
 		firstByte := path[0]
 		child := n.findChild(firstByte)
-		if child != nil && len(child.prefix) > 0 && len(path) >= len(child.prefix) && path[:len(child.prefix)] == child.prefix {
-			// Remove the prefix from the path
-			subPath := path[len(child.prefix):]
-
-			// IMPORTANT: Remove leading slash if present
-			if len(subPath) > 0 && subPath[0] == '/' {
-				subPath = subPath[1:]
-			}
-
-			if handler, subParams := child.findRoute(subPath, params); handler != nil {
-				return handler, subParams
+		if child != nil && len(child.prefix) > 0 {
+			pl := len(child.prefix)
+			if len(path) >= pl && path[:pl] == child.prefix {
+				subPath := path[pl:]
+				if len(subPath) > 0 && subPath[0] == '/' {
+					subPath = subPath[1:]
+				}
+				if handler, subParams := child.findRoute(subPath, params); handler != nil {
+					return handler, subParams
+				}
 			}
 		}
 	}
 
-	// Try parameter child
+	// Try parameter child.
 	hasParamChild := n.paramChild != nil
 	if hasParamChild {
-		// Extract parameter value - check for invalid chars during extraction
 		i := 0
-		hasInvalidSlash := false
 		for i < len(path) && path[i] != '/' {
-			if path[i] == '/' {
-				hasInvalidSlash = true
-				break
-			}
 			i++
 		}
-
-		paramValue := path[:i]
-
-		// Reject empty or invalid parameter values
-		if paramValue == "" || hasInvalidSlash {
-			// Parameter child exists but value is invalid - don't fall through to wildcard
+		if i == 0 {
 			return nil, nil
 		}
 
-		remainingPath := ""
-		if i < len(path) {
-			remainingPath = path[i:]
-			if len(remainingPath) > 0 && remainingPath[0] == '/' {
-				remainingPath = remainingPath[1:] // Skip the slash
-			}
-		}
-
-		// Add parameter to params
-		newParams := append(params, Param{Key: n.paramChild.paramName, Value: paramValue})
-
-		// If no remaining path, return the handler directly
-		if remainingPath == "" {
+		newParams := append(params, Param{Key: n.paramChild.paramName, Value: path[:i]})
+		if i == len(path) {
 			return n.paramChild.handler, newParams
 		}
-
-		// Continue with parameter child
-		if handler, subParams := n.paramChild.findRoute(remainingPath, newParams); handler != nil {
+		if handler, subParams := n.paramChild.findRoute(path[i+1:], newParams); handler != nil {
 			return handler, subParams
 		}
 	}
 
-	// Try wildcard only if no parameter child exists
-	// Wildcard is a catch-all for paths that don't match any specific route
+	// Wildcard only when no parameter child exists.
 	if n.wildcardChild != nil && !hasParamChild {
 		newParams := append(params, Param{Key: n.wildcardChild.wildcardName, Value: path})
 		return n.wildcardChild.handler, newParams

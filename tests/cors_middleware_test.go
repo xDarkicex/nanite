@@ -57,14 +57,17 @@ func TestMiddlewareWithContextModification(t *testing.T) {
 
 	// Another middleware that reads and modifies context
 	r.Use(func(c *nanite.Context, next func()) {
-		val, _ := c.Get("middleware1").(string)
+		raw, _ := c.Get("middleware1")
+		val, _ := raw.(string)
 		c.Set("middleware2", val+"-modified")
 		next()
 	})
 
 	r.Get("/test", func(c *nanite.Context) {
-		val1, _ := c.Get("middleware1").(string)
-		val2, _ := c.Get("middleware2").(string)
+		raw1, _ := c.Get("middleware1")
+		raw2, _ := c.Get("middleware2")
+		val1, _ := raw1.(string)
+		val2, _ := raw2.(string)
 		if val1 != "value1" || val2 != "value1-modified" {
 			t.Errorf("Context values not correct: %s, %s", val1, val2)
 		}

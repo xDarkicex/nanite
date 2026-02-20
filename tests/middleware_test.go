@@ -14,7 +14,8 @@ import (
 
 func trackingMiddleware(id string) nanite.MiddlewareFunc {
 	return func(ctx *nanite.Context, next func()) {
-		trace, _ := ctx.Get("trace").([]string)
+		raw, _ := ctx.Get("trace")
+		trace, _ := raw.([]string)
 		if trace == nil {
 			trace = make([]string, 0, 10)
 		}
@@ -23,7 +24,8 @@ func trackingMiddleware(id string) nanite.MiddlewareFunc {
 
 		next()
 
-		trace, _ = ctx.Get("trace").([]string)
+		raw, _ = ctx.Get("trace")
+		trace, _ = raw.([]string)
 		trace = append(trace, fmt.Sprintf("Exit %s", id))
 		ctx.Set("trace", trace)
 	}
@@ -32,7 +34,8 @@ func trackingMiddleware(id string) nanite.MiddlewareFunc {
 func stackTraceMiddleware(ctx *nanite.Context, next func()) {
 	var stack [8192]byte
 	stackLen := runtime.Stack(stack[:], false)
-	trace, _ := ctx.Get("stackDepth").([]int)
+	raw, _ := ctx.Get("stackDepth")
+	trace, _ := raw.([]int)
 	if trace == nil {
 		trace = make([]int, 0, 10)
 	}
@@ -47,7 +50,8 @@ func testHandler(ctx *nanite.Context) {
 }
 
 func simpleHandler(ctx *nanite.Context) {
-	trace, _ := ctx.Get("trace").([]string)
+	raw, _ := ctx.Get("trace")
+	trace, _ := raw.([]string)
 	if trace == nil {
 		trace = []string{}
 	}
@@ -56,7 +60,11 @@ func simpleHandler(ctx *nanite.Context) {
 }
 
 func assertTrace(t *testing.T, ctx *nanite.Context, expected []string) {
-	trace, ok := ctx.Get("trace").([]string)
+	raw, exists := ctx.Get("trace")
+	trace, ok := raw.([]string)
+	if !exists {
+		ok = false
+	}
 	if !ok {
 		trace = nil
 	}
@@ -381,7 +389,11 @@ func TestMiddlewareEdgeCases(t *testing.T) {
 		handler(ctx)
 
 		expectedLen := 31 // 15 enter + Handler + 15 exit
-		trace, ok := ctx.Get("trace").([]string)
+		raw, exists := ctx.Get("trace")
+		trace, ok := raw.([]string)
+		if !exists {
+			ok = false
+		}
 		if !ok || len(trace) != expectedLen {
 			t.Errorf("Large chain expected len %d, got %d", expectedLen, len(trace))
 		}

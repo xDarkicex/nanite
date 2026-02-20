@@ -62,7 +62,7 @@ func (c *Context) WrittenBytes() int {
 	if rw, ok := c.Writer.(interface{ Written() int }); ok {
 		return rw.Written()
 	}
-	return -1
+	return 0
 }
 
 //go:inline
@@ -73,11 +73,20 @@ func (c *Context) Set(key string, value interface{}) {
 // Get retrieves a value from the context's value map.
 //
 //go:inline
-func (c *Context) Get(key string) interface{} {
-	if c.Values != nil {
-		return c.Values[key]
+func (c *Context) Get(key string) (interface{}, bool) {
+	if c.Values == nil {
+		return nil, false
 	}
-	return nil
+	value, ok := c.Values[key]
+	return value, ok
+}
+
+// GetValue returns the context value only, preserving old access semantics.
+//
+//go:inline
+func (c *Context) GetValue(key string) interface{} {
+	value, _ := c.Get(key)
+	return value
 }
 
 // Bind decodes the request body into the provided interface.

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +27,7 @@ func main() {
 	framework := flag.String("framework", "nanite", "framework to run: nanite|httprouter|chi|gorilla|fiber")
 	addr := flag.String("addr", "127.0.0.1:18080", "listen address")
 	flag.Parse()
+	startPprofIfEnabled()
 
 	switch strings.ToLower(*framework) {
 	case "nanite":
@@ -40,6 +43,23 @@ func main() {
 	default:
 		log.Fatalf("unknown framework %q", *framework)
 	}
+}
+
+func startPprofIfEnabled() {
+	pprofAddr := os.Getenv("WRK_SERVER_PPROF_ADDR")
+	if pprofAddr == "" {
+		return
+	}
+	// Diagnostic mode for live contention/jitter analysis.
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+
+	go func() {
+		log.Printf("starting pprof server on %s", pprofAddr)
+		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			log.Printf("pprof server stopped: %v", err)
+		}
+	}()
 }
 
 func runHTTPServer(addr string, handler http.Handler) {

@@ -74,7 +74,8 @@ func TestMiddlewareStateCaptureBug(t *testing.T) {
 	}
 
 	r.Get("/test", func(c *nanite.Context) {
-		val, ok := c.Get("mw_value").(int)
+		raw, _ := c.Get("mw_value")
+		val, ok := raw.(int)
 		if ok {
 			t.Logf("Middleware value: %d", val)
 		}
@@ -105,7 +106,12 @@ func TestMiddlewareClosureVariableCapture(t *testing.T) {
 	}
 
 	r.Get("/test", func(c *nanite.Context) {
-		if val, ok := c.Get("mw_val").(string); ok {
+		if raw, exists := c.Get("mw_val"); exists {
+			val, ok := raw.(string)
+			if !ok {
+				c.String(http.StatusOK, "OK")
+				return
+			}
 			t.Logf("Final middleware value: %s", val)
 		}
 		c.String(http.StatusOK, "OK")
