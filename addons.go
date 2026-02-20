@@ -192,9 +192,7 @@ func ValidationMiddleware(chains ...*ValidationChain) MiddlewareFunc {
 					}
 				}
 				ctx.Values["formData"] = formData
-			}
-
-			if strings.HasPrefix(contentType, "application/json") {
+			} else if strings.HasPrefix(contentType, "application/json") {
 				originalBody := ctx.Request.Body
 				defer func() {
 					if err := originalBody.Close(); err != nil {
@@ -244,6 +242,10 @@ func ValidationMiddleware(chains ...*ValidationChain) MiddlewareFunc {
 
 				ctx.Request.Body = io.NopCloser(bytes.NewReader(buffer.Bytes()))
 				ctx.Values["body"] = body
+			} else {
+				// Unsupported content type - skip validation, continue to handler
+				next()
+				return
 			}
 
 			// Set up validation rules
