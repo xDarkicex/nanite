@@ -463,11 +463,14 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 	for i := len(routeMiddleware) - 1; i >= 0; i-- {
 		mw := routeMiddleware[i]
 		next := wrapped
+		// Capture current values for closure (fixes Go <1.22 loop variable capture bug)
+		currentMw := mw
+		currentNext := next
 		wrapped = func(c *Context) {
 			if !c.IsAborted() {
-				mw(c, func() {
+				currentMw(c, func() {
 					if !c.IsAborted() {
-						next(c)
+						currentNext(c)
 					}
 				})
 			}

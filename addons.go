@@ -246,9 +246,19 @@ func ValidationMiddleware(chains ...*ValidationChain) MiddlewareFunc {
 				ctx.Values["body"] = body
 			}
 
+			// Set up validation rules
 			for _, chain := range chains {
 				field := ctx.Field(chain.field)
 				field.rules = append(field.rules, chain.rules...)
+			}
+
+			// Run validation BEFORE calling handler
+			if !ctx.CheckValidation() {
+				// Validation failed, CheckValidation already sent the response
+				for _, chain := range chains {
+					chain.Release()
+				}
+				return
 			}
 		}
 
