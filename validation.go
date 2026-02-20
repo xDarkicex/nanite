@@ -16,6 +16,7 @@ var (
 	errInvalidFormat = "invalid format"
 	errMustBeNumber  = "must be a number"
 	errMustBeBoolean = "must be a boolean value"
+	emailRegex       = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 )
 
 // ValidationError represents a single validation error with field and message.
@@ -324,7 +325,7 @@ func (vc *ValidationChain) IsEmail() *ValidationChain {
 			return nil
 		}
 
-		if !strings.Contains(value, "@") || !strings.Contains(value, ".") {
+		if !emailRegex.MatchString(value) {
 			return vc.preAllocatedErrors[errIndex]
 		}
 		return nil
@@ -341,7 +342,7 @@ func (vc *ValidationChain) Required() *ValidationChain {
 	// Store index for this specific error
 	errIndex := len(vc.preAllocatedErrors) - 1
 	vc.rules = append(vc.rules, func(value string) *ValidationError {
-		if value == "" {
+		if strings.TrimSpace(value) == "" {
 			// Return the pre-allocated error directly
 			return vc.preAllocatedErrors[errIndex]
 		}
