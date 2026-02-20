@@ -283,6 +283,58 @@ if err != nil {
 }
 ```
 
+Full dual-stack example:
+
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/xDarkicex/nanite"
+    nanitequic "github.com/xDarkicex/nanite/quic"
+)
+
+func main() {
+    r := nanite.New()
+    r.Use(nanitequic.AltSvcNaniteMiddleware(nanitequic.AltSvcConfig{
+        UDPPort: 8443,
+        MaxAge:  300,
+    }))
+    r.Get("/healthz", func(c *nanite.Context) {
+        c.String(http.StatusOK, "ok")
+    })
+
+    qs := nanitequic.NewRouterServer(r, nanitequic.Config{
+        Addr:                   ":8443", // HTTP/3 over UDP
+        HTTP1Addr:              ":8080", // HTTP/1.1+2 over TCP
+        CertFile:               "server.crt",
+        KeyFile:                "server.key",
+        HTTP1ReadHeaderTimeout: 2 * time.Second,
+        HTTP1MaxHeaderBytes:    1 << 20,
+    })
+
+    go func() {
+        if err := qs.StartDualAndServe(); err != nil {
+            log.Fatalf("dual-stack server failed: %v", err)
+        }
+    }()
+
+    sig := make(chan os.Signal, 1)
+    signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+    <-sig
+
+    if err := qs.ShutdownGraceful(5 * time.Second); err != nil {
+        log.Printf("shutdown error: %v", err)
+    }
+}
+```
+
 Alt-Svc advertisement middleware:
 
 ```go
@@ -311,6 +363,14 @@ qs := nanitequic.New(r, nanitequic.Config{
     TLSConfig: tlsCfg, // uses ListenAndServe with this config
 })
 ```
+
+Production notes:
+
+- UDP load balancer: HTTP/3 requires UDP routing. Ensure your LB supports UDP and preserves client source address as needed for QUIC behavior.
+- Firewall and security groups: open both TCP (for HTTP/1.1+2 fallback) and UDP (for HTTP/3), typically same public port.
+- Cert rotation: rotate cert/key atomically on disk and restart gracefully; for advanced rotation, provide `TLSConfig` with dynamic cert loading.
+- Alt-Svc rollout: start with low `MaxAge` (for example 60-300s), verify client success/error telemetry, then increase to longer cache durations.
+- Mixed clients: keep dual-stack enabled during rollout since some clients or networks still block UDP/QUIC.
 
 ## Static Files
 
