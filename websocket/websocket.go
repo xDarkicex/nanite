@@ -136,8 +136,13 @@ func RegisterWithConfig(r *nanite.Router, path string, handler Handler, cfg Conf
 			for {
 				select {
 				case <-pingTicker.C:
-					_ = conn.SetWriteDeadline(time.Now().Add(conf.WriteTimeout))
-					if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					// WriteControl is safe to call concurrently with application writes.
+					// This avoids concurrent-write races between ping loop and handler writes.
+					if err := conn.WriteControl(
+						websocket.PingMessage,
+						nil,
+						time.Now().Add(conf.WriteTimeout),
+					); err != nil {
 						return
 					}
 				case <-wsCtx.Done():
