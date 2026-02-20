@@ -220,23 +220,9 @@ func (c *Context) ClearValues() {
 }
 
 func (c *Context) Reset(w http.ResponseWriter, r *http.Request) {
-	// Reuse or create response writer wrapper
-	if rw, ok := w.(*responseWriter); ok {
-		// Fast path: reset existing wrapper (~3ns)
-		rw.ResponseWriter = w
-		rw.status = 0
-		rw.written = 0
-		rw.headerWritten = false
-		c.Writer = rw
-	} else {
-		// Slow path: create new wrapper (~15ns)
-		c.Writer = &responseWriter{
-			ResponseWriter: w,
-			status:         0,
-			written:        0,
-			headerWritten:  false,
-		}
-	}
+	// In ServeHTTP the writer is already wrapped and pooled.
+	// Keep the incoming writer as-is to avoid per-request wrapper allocation.
+	c.Writer = w
 
 	// Common reset operations (~22ns)
 	c.Request = r
@@ -245,12 +231,29 @@ func (c *Context) Reset(w http.ResponseWriter, r *http.Request) {
 	}
 	c.ParamsCount = 0
 	c.aborted = false
+	c.requestErr = nil
+	c.middlewareChain = nil
+	c.finalHandler = nil
+	c.middlewareIndex = 0
 	clear(c.Values)
-	for k, field := range c.lazyFields {
-		putLazyField(field)
-		delete(c.lazyFields, k)
-	}
+	// Don't clear lazyFields - reuse them across requests
 	c.ValidationErrs = nil
+}
+
+// runMiddlewareChain executes middleware without allocating a new "next" closure per layer.
+func (c *Context) runMiddlewareChain(handler HandlerFunc, middleware []MiddlewareFunc) {
+	if c.aborted {
+		return
+	}
+	if len(middleware) == 0 {
+		handler(c)
+		return
+	}
+
+	c.middlewareChain = middleware
+	c.finalHandler = handler
+	c.middlewareIndex = 0
+	c.nextMiddleware()
 }
 
 // CheckValidation validates all lazy fields and returns true if validation passed
@@ -395,13 +398,18 @@ func (c *Context) ClearLazyFields() {
 
 // Error stores an error in the context and aborts the current request
 func (c *Context) Error(err error) {
+	c.requestErr = err
 	c.Values["error"] = err
 	c.Abort()
 }
 
 // GetError retrieves the current error from the context
 func (c *Context) GetError() error {
+	if c.requestErr != nil {
+		return c.requestErr
+	}
 	if err, ok := c.Values["error"].(error); ok {
+		c.requestErr = err
 		return err
 	}
 	return nil

@@ -2,6 +2,7 @@
 package nanite
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -44,7 +45,14 @@ type Context struct {
 	ParamsCount int // Number of active parameters in the Params array, avoids unnecessary iterations
 
 	// Boolean flags (1 byte + potential padding)
-	aborted bool // Request termination flag that stops middleware chain execution when true
+	aborted    bool  // Request termination flag that stops middleware chain execution when true
+	requestErr error // Hot-path error storage to avoid map lookups in ServeHTTP
+
+	// Middleware execution state (reused per request to avoid per-call closure allocs)
+	middlewareChain []MiddlewareFunc
+	finalHandler    HandlerFunc
+	middlewareIndex int
+	nextMiddleware  func()
 }
 
 type ValidationErrors []ValidationError
@@ -76,12 +84,12 @@ type Config struct {
 }
 
 type WebSocketConfig struct {
-	ReadTimeout     time.Duration // Timeout for reading messages
-	WriteTimeout    time.Duration // Timeout for writing messages
-	PingInterval    time.Duration // Interval for sending pings
-	MaxMessageSize  int64         // Maximum message size in bytes
-	BufferSize      int           // Buffer size for read/write operations
-	AllowedOrigins  []string      // List of allowed origin patterns (empty means same-origin only)
+	ReadTimeout    time.Duration // Timeout for reading messages
+	WriteTimeout   time.Duration // Timeout for writing messages
+	PingInterval   time.Duration // Interval for sending pings
+	MaxMessageSize int64         // Maximum message size in bytes
+	BufferSize     int           // Buffer size for read/write operations
+	AllowedOrigins []string      // List of allowed origin patterns (empty means same-origin only)
 }
 
 type staticRoute struct {
@@ -186,13 +194,34 @@ func New() *Router {
 
 	// Context pool with memory-efficient initialization
 	r.Pool.New = func() interface{} {
-		return &Context{
+		ctx := &Context{
 			Params:     [10]Param{},                     // Pre-allocated parameter array
 			Values:     make(map[string]interface{}, 8), // Common case: 8-12 context values
 			lazyFields: make(map[string]*LazyField),     // Lazy response formatting
 			Writer:     &responseWriter{},               // Initialize with empty writer
 			aborted:    false,
 		}
+
+		ctx.nextMiddleware = func() {
+			if ctx.aborted {
+				return
+			}
+
+			if ctx.middlewareIndex < len(ctx.middlewareChain) {
+				current := ctx.middlewareChain[ctx.middlewareIndex]
+				ctx.middlewareIndex++
+				current(ctx, ctx.nextMiddleware)
+				return
+			}
+
+			if ctx.finalHandler != nil {
+				handler := ctx.finalHandler
+				ctx.finalHandler = nil
+				handler(ctx)
+			}
+		}
+
+		return ctx
 	}
 
 	// WebSocket configuration with secure defaults
@@ -462,20 +491,11 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 	copy(routeMiddleware[len(r.middleware):], middleware)
 
 	wrapped := handler
-	for i := len(routeMiddleware) - 1; i >= 0; i-- {
-		mw := routeMiddleware[i]
-		next := wrapped
-		// Capture current values for closure (fixes Go <1.22 loop variable capture bug)
-		currentMw := mw
-		currentNext := next
+	if len(routeMiddleware) > 0 {
+		chain := routeMiddleware
+		finalHandler := handler
 		wrapped = func(c *Context) {
-			if !c.IsAborted() {
-				currentMw(c, func() {
-					if !c.IsAborted() {
-						currentNext(c)
-					}
-				})
-			}
+			c.runMiddlewareChain(finalHandler, chain)
 		}
 	}
 
@@ -512,7 +532,7 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 	}
 }
 
-func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []Param) { // Exported for testing
+func (r *Router) findHandlerAndMiddlewareWithParams(method, path string, params []Param) (HandlerFunc, []Param) {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -535,8 +555,7 @@ func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []P
 
 	// Third tier: use radix tree for dynamic routes
 	if tree, exists := r.trees[method]; exists {
-		// Use an empty params slice that we'll populate
-		params := make([]Param, 0, 5)
+		params = params[:0]
 
 		searchPath := path
 		if len(path) > 0 && path[0] == '/' {
@@ -548,7 +567,9 @@ func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []P
 		// Cache successful lookups to speed up future requests
 		// The LRU handles memory management, parameter pooling, and string interning
 		if handler != nil && r.routeCache != nil {
-			r.routeCache.Add(method, path, handler, params)
+			cachedParams := getParamSlice(len(params))
+			cachedParams = append(cachedParams, params...)
+			r.routeCache.Add(method, path, handler, cachedParams)
 		}
 
 		return handler, params
@@ -558,9 +579,40 @@ func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []P
 	return nil, nil
 }
 
+func (r *Router) FindHandlerAndMiddleware(method, path string) (HandlerFunc, []Param) { // Exported for testing
+	return r.findHandlerAndMiddlewareWithParams(method, path, make([]Param, 0, 5))
+}
+
+// Pools for zero-allocation request handling
+var responseWriterPool = sync.Pool{
+	New: func() interface{} {
+		return &TrackedResponseWriter{}
+	},
+}
+
+var bufferedWriterPool = sync.Pool{
+	New: func() interface{} {
+		return &BufferedResponseWriter{
+			buffer: new(bytes.Buffer),
+		}
+	},
+}
+
+var defaultNotFoundBody = []byte("404 page not found\n")
+
+func writeDefaultNotFound(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write(defaultNotFoundBody)
+}
+
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// Initialize response writer chain with tracking and buffering
-	trackedWriter := WrapResponseWriter(w)
+	// Get pooled response writers
+	trackedWriter := responseWriterPool.Get().(*TrackedResponseWriter)
+	trackedWriter.ResponseWriter = w
+	trackedWriter.statusCode = http.StatusOK
+	trackedWriter.headerWritten = false
+	trackedWriter.bytesWritten = 0
+
 	// Get content type from response headers or request Accept header
 	contentType := w.Header().Get("Content-Type")
 	if contentType == "" {
@@ -570,69 +622,31 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	bufferedWriter := newBufferedResponseWriter(trackedWriter, contentType, r.config)
-	defer bufferedWriter.Close()
+	bufferedWriter := bufferedWriterPool.Get().(*BufferedResponseWriter)
+	bufferedWriter.TrackedResponseWriter = trackedWriter
+	bufferedWriter.autoFlush = true
+	bufferedWriter.buffer.Reset()
+	bufferedWriter.bufferSize = DefaultBufferSize
+
+	// Determine buffer size from content type without []byte conversions
+	contentType = strings.TrimSpace(contentType)
+	if semicolon := strings.IndexByte(contentType, ';'); semicolon >= 0 {
+		contentType = contentType[:semicolon]
+	}
+
+	if contentType != "" {
+		if strings.HasPrefix(contentType, "text/") || strings.HasPrefix(contentType, "application/json") {
+			bufferedWriter.bufferSize = TextBufferSize
+		} else {
+			bufferedWriter.bufferSize = BinaryBufferSize
+		}
+	}
+
 	// Get a context from the pool and initialize it with a single Reset call
 	ctx := r.Pool.Get().(*Context)
 	ctx.Reset(bufferedWriter, req)
-	// Ensure context is returned to pool when done
-	defer func() {
-		ctx.CleanupPooledResources()
-		r.Pool.Put(ctx)
-	}()
-	// Set up context cancellation monitoring
-	reqCtx := req.Context()
-	if reqCtx.Done() != nil {
-		finished := make(chan struct{})
-		defer close(finished)
-		go func() {
-			select {
-			case <-reqCtx.Done():
-				ctx.Abort()
-				if !trackedWriter.Written() {
-					statusCode := http.StatusGatewayTimeout
-					if reqCtx.Err() == context.Canceled {
-						statusCode = 499 // Client closed request
-					}
-					http.Error(trackedWriter, fmt.Sprintf("Request %v", reqCtx.Err()), statusCode)
-				}
-			case <-finished:
-				// Handler completed normally
-			}
-		}()
-	}
 
-	// Route lookup: find the appropriate handler and parameters
-	handler, params := r.FindHandlerAndMiddleware(req.Method, req.URL.Path)
-	var safeParams []Param
-	if len(params) > 0 {
-		safeParams = make([]Param, len(params))
-		copy(safeParams, params)
-	} else {
-		safeParams = nil
-	}
-	if handler == nil {
-		// Handle 404 Not Found
-		if r.config.NotFoundHandler != nil {
-			r.config.NotFoundHandler(ctx)
-		} else {
-			http.NotFound(trackedWriter, req)
-		}
-		bufferedWriter.Close()
-		return
-	}
-	// Copy route parameters to context's fixed-size array
-	for i, p := range safeParams {
-		if i < len(ctx.Params) {
-			ctx.Params[i] = p
-		}
-	}
-	ctx.ParamsCount = len(safeParams)
-
-	// Make router configuration available to middleware
-	ctx.Values["routerConfig"] = r.config
-
-	// Set up panic recovery
+	// Use a single defer for panic recovery and pooled resource cleanup.
 	defer func() {
 		if err := recover(); err != nil {
 			ctx.Abort()
@@ -664,7 +678,37 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 			bufferedWriter.Close()
 		}
+		ctx.CleanupPooledResources()
+		r.Pool.Put(ctx)
+		bufferedWriterPool.Put(bufferedWriter)
+		responseWriterPool.Put(trackedWriter)
 	}()
+
+	// Route lookup: find the appropriate handler and parameters
+	var paramsBuf [10]Param
+	handler, params := r.findHandlerAndMiddlewareWithParams(req.Method, req.URL.Path, paramsBuf[:0])
+
+	// Copy params to context's fixed-size array (no allocation)
+	for i, p := range params {
+		if i < len(ctx.Params) {
+			ctx.Params[i] = p
+		}
+	}
+	ctx.ParamsCount = len(params)
+
+	if handler == nil {
+		// Handle 404 Not Found
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
+		}
+		bufferedWriter.Close()
+		return
+	}
+
+	// Make router configuration available to middleware
+	ctx.Values["routerConfig"] = r.config
 
 	// Execute the wrapped handler (already includes all middleware)
 	handler(ctx)
@@ -687,7 +731,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if r.config.NotFoundHandler != nil {
 			r.config.NotFoundHandler(ctx)
 		} else {
-			http.NotFound(trackedWriter, req)
+			writeDefaultNotFound(trackedWriter)
 		}
 	}
 

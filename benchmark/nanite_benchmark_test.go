@@ -1,13 +1,45 @@
 package nanite_test
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/xDarkicex/nanite"
 )
+
+type benchmarkResponseWriter struct {
+	header http.Header
+	code   int
+}
+
+func newBenchmarkResponseWriter() *benchmarkResponseWriter {
+	return &benchmarkResponseWriter{
+		header: make(http.Header, 4),
+	}
+}
+
+func (w *benchmarkResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *benchmarkResponseWriter) WriteHeader(code int) {
+	w.code = code
+}
+
+func (w *benchmarkResponseWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return len(b), nil
+}
+
+func (w *benchmarkResponseWriter) Reset() {
+	clear(w.header)
+	w.code = 0
+}
 
 // --------- Test Handlers ---------
 // Simple handler that does nothing
@@ -117,11 +149,12 @@ func BenchmarkStaticRoutes(b *testing.B) {
 			router := setupStaticRouter()
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				w := httptest.NewRecorder()
+				w.Reset()
 				router.ServeHTTP(w, req)
 			}
 		})
@@ -147,11 +180,12 @@ func BenchmarkParamRoutes(b *testing.B) {
 			router := setupParamRouter()
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				w := httptest.NewRecorder()
+				w.Reset()
 				router.ServeHTTP(w, req)
 			}
 		})
@@ -177,11 +211,12 @@ func BenchmarkMiddlewareChain(b *testing.B) {
 			router := setupMiddlewareRouter()
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				w := httptest.NewRecorder()
+				w.Reset()
 				router.ServeHTTP(w, req)
 			}
 		})
@@ -200,11 +235,15 @@ func BenchmarkJSONHandling(b *testing.B) {
 
 		b.ReportAllocs()
 		b.ResetTimer()
+		w := newBenchmarkResponseWriter()
+		req := httptest.NewRequest("POST", "/api/users", nil)
+		req.Header.Set("Content-Type", "application/json")
+		payload := []byte(jsonBody)
 
 		for i := 0; i < b.N; i++ {
-			req := httptest.NewRequest("POST", "/api/users", strings.NewReader(jsonBody))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
+			req.Body = io.NopCloser(bytes.NewReader(payload))
+			req.ContentLength = int64(len(payload))
+			w.Reset()
 			router.ServeHTTP(w, req)
 		}
 	})
@@ -218,11 +257,12 @@ func BenchmarkRouteCache(b *testing.B) {
 		router.Get("/users/:id", paramHandler)
 
 		req := httptest.NewRequest("GET", "/users/123", nil)
+		w := newBenchmarkResponseWriter()
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			w := httptest.NewRecorder()
+			w.Reset()
 			router.ServeHTTP(w, req)
 		}
 	})
@@ -234,11 +274,12 @@ func BenchmarkRouteCache(b *testing.B) {
 		router.Get("/users/:id", paramHandler)
 
 		req := httptest.NewRequest("GET", "/users/123", nil)
+		w := newBenchmarkResponseWriter()
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			w := httptest.NewRecorder()
+			w.Reset()
 			router.ServeHTTP(w, req)
 		}
 	})
@@ -263,11 +304,12 @@ func BenchmarkNotFound(b *testing.B) {
 			router := setupStaticRouter()
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				w := httptest.NewRecorder()
+				w.Reset()
 				router.ServeHTTP(w, req)
 			}
 		})
@@ -311,11 +353,12 @@ func BenchmarkGitHubAPI(b *testing.B) {
 			router.Get("/users/:user/events/orgs/:org", multiParamHandler)
 
 			req := httptest.NewRequest("GET", path, nil)
+			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				w := httptest.NewRecorder()
+				w.Reset()
 				router.ServeHTTP(w, req)
 			}
 		})

@@ -593,50 +593,36 @@ func NewLRUCache(capacity, maxParams int) *LRUCache {
 }
 
 func (c *LRUCache) Add(method, path string, handler HandlerFunc, params []Param) {
-	// Intern strings to reduce allocations
-	method = internString(method)
-	path = internString(path)
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	key := routeCacheKey{method: method, path: path}
+
 	// Check if the key already exists
 	if idx, exists := c.indices[key]; exists {
 		entry := &c.entries[idx]
-		entry.handler = handler
-		// Reuse params slice if capacity is sufficient
-		if cap(entry.params) >= len(params) {
-			entry.params = entry.params[:len(params)]
-			copy(entry.params, params)
-		} else {
-			if entry.params != nil {
-				putParamSlice(entry.params)
-			}
-			newParams := getParamSlice(len(params))
-			newParams = newParams[:len(params)]
-			copy(newParams, params)
-			entry.params = newParams
+		if entry.params != nil {
+			putParamSlice(entry.params)
 		}
+		entry.handler = handler
+		entry.params = params // Store params directly
 		c.moveToFront(idx)
 		return
 	}
+
 	idx := c.tail
 	entry := &c.entries[idx]
 	oldKey := entry.key
 	if oldKey.method != "" || oldKey.path != "" {
 		delete(c.indices, oldKey)
 	}
-
 	if entry.params != nil {
 		putParamSlice(entry.params)
 	}
-	entry.key.method = method
-	entry.key.path = path
+
+	entry.key = key
 	entry.handler = handler
-	newParams := getParamSlice(len(params))
-	newParams = newParams[:len(params)]
-	copy(newParams, params)
-	entry.params = newParams
-	c.indices[entry.key] = idx
+	entry.params = params
+	c.indices[key] = idx
 	c.moveToFront(idx)
 }
 
@@ -648,12 +634,9 @@ func (c *LRUCache) Get(method, path string) (HandlerFunc, []Param, bool) {
 		}
 	}()
 
-	// Intern strings for consistency
-	method = internString(method)
-	path = internString(path)
-	key := routeCacheKey{method: method, path: path}
+	// Fast path: read-only lock for lookup
 	c.mutex.RLock()
-	idx, exists := c.indices[key]
+	idx, exists := c.indices[routeCacheKey{method: method, path: path}]
 	if !exists {
 		atomic.AddInt64(&c.misses, 1)
 		c.mutex.RUnlock()
@@ -662,19 +645,15 @@ func (c *LRUCache) Get(method, path string) (HandlerFunc, []Param, bool) {
 
 	entry := &c.entries[idx]
 	handler := entry.handler
-	var params []Param
-	if len(entry.params) > 0 {
-		params = getParamSlice(len(entry.params))
-		params = params[:len(entry.params)]
-		copy(params, entry.params)
-	} else {
-		params = nil
-	}
+	params := entry.params // Return cached params directly (caller must not modify)
 
 	c.mutex.RUnlock()
+
+	// Move to front (write lock only for this)
 	c.mutex.Lock()
 	c.moveToFront(idx)
 	c.mutex.Unlock()
+
 	atomic.AddInt64(&c.hits, 1)
 	return handler, params, true
 }
@@ -949,13 +928,10 @@ func (w *BufferedResponseWriter) Flush() {
 }
 
 func (w *BufferedResponseWriter) Close() {
-	if w == nil {
+	if w == nil || w.buffer == nil {
 		return
 	}
 
-	if w.buffer != nil {
-		w.Flush()
-		bufferPool.Put(w.buffer)
-		w.buffer = nil
-	}
+	w.Flush()
+	w.buffer.Reset()
 }
