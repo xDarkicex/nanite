@@ -236,6 +236,10 @@ qs := nanitequic.New(r, nanitequic.Config{
     QUICConfig: &quicgo.Config{
         MaxIdleTimeout: 15 * time.Second,
     },
+    Logger: func(e nanitequic.Event) {
+        // e.Component: h1|h3|server, e.Status: started|stopped|error
+        // e.Addr, e.Err, e.Time are available for structured logging.
+    },
 })
 
 // HTTP/3 only

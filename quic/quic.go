@@ -32,6 +32,9 @@ type Config struct {
 	HTTP1IdleTimeout       time.Duration
 	HTTP1MaxHeaderBytes    int
 	HTTP1DisableKeepAlives bool
+
+	// Optional structured lifecycle callback.
+	Logger LoggerFunc
 }
 
 // DefaultConfig returns opinionated transport defaults.
@@ -54,6 +57,18 @@ type Server struct {
 	h3 *http3.Server
 	h1 *http.Server
 }
+
+// Event carries structured lifecycle signals for observability hooks.
+type Event struct {
+	Time      time.Time
+	Component string // "h1", "h3", or "server"
+	Status    string // "started", "stopped", or "error"
+	Addr      string
+	Err       error
+}
+
+// LoggerFunc receives structured lifecycle events.
+type LoggerFunc func(Event)
 
 // New constructs a QUIC server wrapper for any net/http-compatible handler.
 func New(handler http.Handler, cfg Config) *Server {
@@ -106,12 +121,17 @@ func New(handler http.Handler, cfg Config) *Server {
 // StartHTTP3 starts only the HTTP/3 listener.
 func (s *Server) StartHTTP3() error {
 	if s.cfg.TLSConfig != nil {
-		return s.h3.ListenAndServe()
+		s.emit("h3", "started", s.cfg.Addr, nil)
+		err := s.h3.ListenAndServe()
+		return s.handleServeResult("h3", s.cfg.Addr, err)
 	}
 	if err := ValidateTLSFiles(s.cfg.CertFile, s.cfg.KeyFile); err != nil {
+		s.emit("h3", "error", s.cfg.Addr, err)
 		return err
 	}
-	return s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+	s.emit("h3", "started", s.cfg.Addr, nil)
+	err := s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+	return s.handleServeResult("h3", s.cfg.Addr, err)
 }
 
 // StartDual starts optional HTTP/1 fallback and HTTP/3 on QUIC.
@@ -128,31 +148,25 @@ func (s *Server) StartDualAndServe() error {
 	if s.cfg.HTTP1DisableKeepAlives {
 		s.h1.SetKeepAlivesEnabled(false)
 	}
+	s.emit("server", "started", s.cfg.Addr, nil)
 
 	errCh := make(chan error, 2)
 
 	go func() {
+		s.emit("h1", "started", s.cfg.HTTP1Addr, nil)
 		err := s.h1.ListenAndServe()
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			errCh <- nil
-			return
-		}
-		errCh <- fmt.Errorf("quic: http1 server error: %w", err)
+		errCh <- s.handleServeResult("h1", s.cfg.HTTP1Addr, err)
 	}()
 
 	go func() {
-		err := s.StartHTTP3()
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			errCh <- nil
-			return
-		}
-		errCh <- fmt.Errorf("quic: http3 server error: %w", err)
+		errCh <- s.StartHTTP3()
 	}()
 
 	var firstErr error
 	for i := 0; i < 2; i++ {
 		if err := <-errCh; err != nil && firstErr == nil {
 			firstErr = err
+			s.emit("server", "error", s.cfg.Addr, err)
 			_ = s.ShutdownGraceful(2 * time.Second)
 		}
 	}
@@ -167,16 +181,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.h3 != nil {
 		if err := s.h3.Close(); err != nil {
 			errs = append(errs, err)
+			s.emit("h3", "error", s.cfg.Addr, err)
 		}
 	}
 
 	if s.h1 != nil {
 		if err := s.h1.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs = append(errs, err)
+			s.emit("h1", "error", s.cfg.HTTP1Addr, err)
 		}
 	}
-
-	return errors.Join(errs...)
+	joined := errors.Join(errs...)
+	if joined != nil {
+		s.emit("server", "error", s.cfg.Addr, joined)
+		return joined
+	}
+	s.emit("server", "stopped", s.cfg.Addr, nil)
+	return nil
 }
 
 // ShutdownGraceful stops listeners using a timeout-backed context.
@@ -187,4 +208,27 @@ func (s *Server) ShutdownGraceful(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return s.Shutdown(ctx)
+}
+
+func (s *Server) emit(component, status, addr string, err error) {
+	if s.cfg.Logger == nil {
+		return
+	}
+	s.cfg.Logger(Event{
+		Time:      time.Now(),
+		Component: component,
+		Status:    status,
+		Addr:      addr,
+		Err:       err,
+	})
+}
+
+func (s *Server) handleServeResult(component, addr string, err error) error {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		s.emit(component, "stopped", addr, nil)
+		return nil
+	}
+	wrapped := fmt.Errorf("quic: %s server error: %w", component, err)
+	s.emit(component, "error", addr, wrapped)
+	return wrapped
 }
