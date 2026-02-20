@@ -221,6 +221,7 @@ import (
 
     "github.com/xDarkicex/nanite"
     nanitequic "github.com/xDarkicex/nanite/quic"
+    quicgo "github.com/quic-go/quic-go"
 )
 
 r := nanite.New()
@@ -232,6 +233,9 @@ qs := nanitequic.New(r, nanitequic.Config{
     Addr:     ":8443",
     CertFile: "server.crt",
     KeyFile:  "server.key",
+    QUICConfig: &quicgo.Config{
+        MaxIdleTimeout: 15 * time.Second,
+    },
 })
 
 // HTTP/3 only
@@ -266,6 +270,9 @@ err := nanitequic.StartRouterDual(r, nanitequic.Config{
     HTTP1Addr: ":8080", // TCP (HTTP/1.1 / HTTP/2)
     CertFile:  "server.crt",
     KeyFile:   "server.key",
+    HTTP1ReadHeaderTimeout: 2 * time.Second,
+    HTTP1MaxHeaderBytes:    1 << 20,
+    HTTP1DisableKeepAlives: false,
 })
 if err != nil {
     panic(err)

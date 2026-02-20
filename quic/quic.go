@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	quiclib "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
@@ -19,22 +20,29 @@ type Config struct {
 	KeyFile  string
 	// Optional prebuilt TLS config. When set, CertFile/KeyFile are ignored.
 	TLSConfig *tls.Config
+	// Optional passthrough for QUIC transport tuning.
+	QUICConfig *quiclib.Config
 
 	// Optional HTTP/1.1 and HTTP/2 fallback address for dual-stack mode.
 	HTTP1Addr string
 
-	HTTP1ReadTimeout  time.Duration
-	HTTP1WriteTimeout time.Duration
-	HTTP1IdleTimeout  time.Duration
+	HTTP1ReadTimeout       time.Duration
+	HTTP1ReadHeaderTimeout time.Duration
+	HTTP1WriteTimeout      time.Duration
+	HTTP1IdleTimeout       time.Duration
+	HTTP1MaxHeaderBytes    int
+	HTTP1DisableKeepAlives bool
 }
 
 // DefaultConfig returns opinionated transport defaults.
 func DefaultConfig() Config {
 	return Config{
-		Addr:              ":8443",
-		HTTP1ReadTimeout:  5 * time.Second,
-		HTTP1WriteTimeout: 60 * time.Second,
-		HTTP1IdleTimeout:  60 * time.Second,
+		Addr:                   ":8443",
+		HTTP1ReadTimeout:       5 * time.Second,
+		HTTP1ReadHeaderTimeout: 5 * time.Second,
+		HTTP1WriteTimeout:      60 * time.Second,
+		HTTP1IdleTimeout:       60 * time.Second,
+		HTTP1MaxHeaderBytes:    1 << 20,
 	}
 }
 
@@ -61,6 +69,12 @@ func New(handler http.Handler, cfg Config) *Server {
 	if cfg.HTTP1IdleTimeout == 0 {
 		cfg.HTTP1IdleTimeout = 60 * time.Second
 	}
+	if cfg.HTTP1ReadHeaderTimeout == 0 {
+		cfg.HTTP1ReadHeaderTimeout = 5 * time.Second
+	}
+	if cfg.HTTP1MaxHeaderBytes == 0 {
+		cfg.HTTP1MaxHeaderBytes = 1 << 20
+	}
 
 	s := &Server{
 		handler: handler,
@@ -68,18 +82,21 @@ func New(handler http.Handler, cfg Config) *Server {
 	}
 
 	s.h3 = &http3.Server{
-		Addr:      cfg.Addr,
-		Handler:   handler,
-		TLSConfig: cfg.TLSConfig,
+		Addr:       cfg.Addr,
+		Handler:    handler,
+		TLSConfig:  cfg.TLSConfig,
+		QUICConfig: cfg.QUICConfig,
 	}
 
 	if cfg.HTTP1Addr != "" {
 		s.h1 = &http.Server{
-			Addr:         cfg.HTTP1Addr,
-			Handler:      handler,
-			ReadTimeout:  cfg.HTTP1ReadTimeout,
-			WriteTimeout: cfg.HTTP1WriteTimeout,
-			IdleTimeout:  cfg.HTTP1IdleTimeout,
+			Addr:              cfg.HTTP1Addr,
+			Handler:           handler,
+			ReadTimeout:       cfg.HTTP1ReadTimeout,
+			ReadHeaderTimeout: cfg.HTTP1ReadHeaderTimeout,
+			WriteTimeout:      cfg.HTTP1WriteTimeout,
+			IdleTimeout:       cfg.HTTP1IdleTimeout,
+			MaxHeaderBytes:    cfg.HTTP1MaxHeaderBytes,
 		}
 	}
 
@@ -107,6 +124,9 @@ func (s *Server) StartDual() error {
 func (s *Server) StartDualAndServe() error {
 	if s.h1 == nil {
 		return errors.New("quic: HTTP1Addr is required for dual-stack mode")
+	}
+	if s.cfg.HTTP1DisableKeepAlives {
+		s.h1.SetKeepAlivesEnabled(false)
 	}
 
 	errCh := make(chan error, 2)
