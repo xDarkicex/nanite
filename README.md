@@ -212,6 +212,17 @@ nanitews.Register(r, "/chat", func(conn *websocket.Conn, c *nanite.Context) {
 })
 ```
 
+Options-based registration:
+
+```go
+nanitews.RegisterWithOptions(r, "/events", handler,
+    nanitews.WithAllowedOrigins("https://app.example.com"),
+    nanitews.WithUpgrader(&websocket.Upgrader{
+        HandshakeTimeout: 5 * time.Second,
+    }),
+)
+```
+
 ## HTTP/3 (QUIC)
 
 ```go

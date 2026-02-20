@@ -53,9 +53,25 @@ func WithUpgrader(upgrader *websocket.Upgrader) Option {
 	}
 }
 
+// NewConfig builds a websocket config from defaults plus functional options.
+func NewConfig(opts ...Option) Config {
+	cfg := DefaultConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
 // Register mounts a websocket endpoint on a Nanite router using GET.
 func Register(r *nanite.Router, path string, handler Handler, middleware ...nanite.MiddlewareFunc) *nanite.Router {
 	return RegisterWithConfig(r, path, handler, DefaultConfig(), middleware...)
+}
+
+// RegisterWithOptions mounts a websocket endpoint using functional config options.
+func RegisterWithOptions(r *nanite.Router, path string, handler Handler, opts ...Option) *nanite.Router {
+	return RegisterWithConfig(r, path, handler, NewConfig(opts...))
 }
 
 // RegisterWithConfig mounts a websocket endpoint with explicit config.
