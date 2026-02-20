@@ -3,7 +3,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/xDarkicex/nanite.svg)](https://pkg.go.dev/github.com/xDarkicex/nanite)
 [![Go Report Card](https://goreportcard.com/badge/github.com/xDarkicex/nanite)](https://goreportcard.com/report/github.com/xDarkicex/nanite) 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-# Nanite
 
 A lightweight, high-performance HTTP router for Go. Designed to be developer-friendly with an Express.js-inspired API, without sacrificing speed.
 
@@ -45,7 +44,16 @@ Nanite achieves zero allocations on both static and param routes.
 
 ```bash
 go get github.com/xDarkicex/nanite
+# Optional websocket module
+go get github.com/xDarkicex/nanite/websocket
 ```
+
+## Module Layout
+
+- `github.com/xDarkicex/nanite` — core router/framework (no websocket dependency in core package)
+- `github.com/xDarkicex/nanite/websocket` — optional websocket integration module
+
+This keeps core focused and lets users opt into websocket functionality only when needed.
 
 ## Quick Start
 
