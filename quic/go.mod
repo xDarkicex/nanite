@@ -2,7 +2,12 @@ module github.com/xDarkicex/nanite/quic
 
 go 1.22
 
-require github.com/quic-go/quic-go v0.49.1
+require (
+	github.com/quic-go/quic-go v0.49.1
+	github.com/xDarkicex/nanite v0.0.0
+)
+
+replace github.com/xDarkicex/nanite => ..
 
 require (
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
@@ -15,7 +20,7 @@ require (
 	golang.org/x/mod v0.18.0 // indirect
 	golang.org/x/net v0.28.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.17.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
 )

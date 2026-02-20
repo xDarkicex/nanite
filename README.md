@@ -217,6 +217,7 @@ nanitews.Register(r, "/chat", func(conn *websocket.Conn, c *nanite.Context) {
 ```go
 import (
     "net/http"
+    "time"
 
     "github.com/xDarkicex/nanite"
     nanitequic "github.com/xDarkicex/nanite/quic"
@@ -237,6 +238,47 @@ qs := nanitequic.New(r, nanitequic.Config{
 if err := qs.StartHTTP3(); err != nil {
     panic(err)
 }
+
+// Graceful shutdown convenience
+if err := qs.ShutdownGraceful(5 * time.Second); err != nil {
+    panic(err)
+}
+```
+
+Router-first helper:
+
+```go
+err := nanitequic.StartRouterHTTP3(r, nanitequic.Config{
+    Addr:     ":8443",
+    CertFile: "server.crt",
+    KeyFile:  "server.key",
+})
+if err != nil {
+    panic(err)
+}
+```
+
+Dual-stack helper (HTTP/1 + HTTP/3):
+
+```go
+err := nanitequic.StartRouterDual(r, nanitequic.Config{
+    Addr:      ":8443", // UDP (HTTP/3)
+    HTTP1Addr: ":8080", // TCP (HTTP/1.1 / HTTP/2)
+    CertFile:  "server.crt",
+    KeyFile:   "server.key",
+})
+if err != nil {
+    panic(err)
+}
+```
+
+Alt-Svc advertisement middleware:
+
+```go
+r.Use(nanitequic.AltSvcNaniteMiddleware(nanitequic.AltSvcConfig{
+    UDPPort: 8443,
+    MaxAge:  86400,
+}))
 ```
 
 ## Static Files

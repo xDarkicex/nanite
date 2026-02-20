@@ -3,8 +3,8 @@ package quic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
@@ -42,9 +42,6 @@ type Server struct {
 
 	h3 *http3.Server
 	h1 *http.Server
-
-	h1Once sync.Once
-	h1Err  chan error
 }
 
 // New constructs a QUIC server wrapper for any net/http-compatible handler.
@@ -65,7 +62,6 @@ func New(handler http.Handler, cfg Config) *Server {
 	s := &Server{
 		handler: handler,
 		cfg:     cfg,
-		h1Err:   make(chan error, 1),
 	}
 
 	s.h3 = &http3.Server{
@@ -95,27 +91,49 @@ func (s *Server) StartHTTP3() error {
 }
 
 // StartDual starts optional HTTP/1 fallback and HTTP/3 on QUIC.
-// HTTP/1 runs in a goroutine; HTTP/3 runs in the foreground.
+// Deprecated compatibility alias for StartDualAndServe.
 func (s *Server) StartDual() error {
+	return s.StartDualAndServe()
+}
+
+// StartDualAndServe starts HTTP/1 fallback and HTTP/3, returning the first non-shutdown error.
+func (s *Server) StartDualAndServe() error {
 	if s.h1 == nil {
 		return errors.New("quic: HTTP1Addr is required for dual-stack mode")
 	}
-
-	s.h1Once.Do(func() {
-		go func() {
-			err := s.h1.ListenAndServe()
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				s.h1Err <- err
-			}
-			close(s.h1Err)
-		}()
-	})
-
-	err := s.StartHTTP3()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if s.cfg.CertFile == "" || s.cfg.KeyFile == "" {
+		return errors.New("quic: CertFile and KeyFile are required")
 	}
-	return err
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		err := s.h1.ListenAndServe()
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			errCh <- nil
+			return
+		}
+		errCh <- fmt.Errorf("quic: http1 server error: %w", err)
+	}()
+
+	go func() {
+		err := s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			errCh <- nil
+			return
+		}
+		errCh <- fmt.Errorf("quic: http3 server error: %w", err)
+	}()
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil && firstErr == nil {
+			firstErr = err
+			_ = s.ShutdownGraceful(2 * time.Second)
+		}
+	}
+
+	return firstErr
 }
 
 // Shutdown gracefully stops HTTP/3 and optional HTTP/1 fallback servers.
@@ -135,4 +153,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// ShutdownGraceful stops listeners using a timeout-backed context.
+func (s *Server) ShutdownGraceful(timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.Shutdown(ctx)
 }

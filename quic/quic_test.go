@@ -44,11 +44,25 @@ func TestStartDualRequiresHTTP1Addr(t *testing.T) {
 	}
 }
 
+func TestStartDualAndServeRequiresTLSFiles(t *testing.T) {
+	s := New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), Config{Addr: ":0", HTTP1Addr: ":0"})
+	if err := s.StartDualAndServe(); err == nil {
+		t.Fatal("expected TLS file validation error")
+	}
+}
+
 func TestShutdownWithoutStart(t *testing.T) {
 	s := New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), Config{Addr: ":0"})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := s.Shutdown(ctx); err != nil {
 		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+}
+
+func TestShutdownGracefulWithoutStart(t *testing.T) {
+	s := New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), Config{Addr: ":0"})
+	if err := s.ShutdownGraceful(time.Second); err != nil {
+		t.Fatalf("unexpected graceful shutdown error: %v", err)
 	}
 }
