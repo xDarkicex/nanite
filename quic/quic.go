@@ -1,0 +1,138 @@
+package quic
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/quic-go/quic-go/http3"
+)
+
+// Config controls HTTP/3 (QUIC) server behavior.
+type Config struct {
+	Addr string
+
+	CertFile string
+	KeyFile  string
+
+	// Optional HTTP/1.1 and HTTP/2 fallback address for dual-stack mode.
+	HTTP1Addr string
+
+	HTTP1ReadTimeout  time.Duration
+	HTTP1WriteTimeout time.Duration
+	HTTP1IdleTimeout  time.Duration
+}
+
+// DefaultConfig returns opinionated transport defaults.
+func DefaultConfig() Config {
+	return Config{
+		Addr:              ":8443",
+		HTTP1ReadTimeout:  5 * time.Second,
+		HTTP1WriteTimeout: 60 * time.Second,
+		HTTP1IdleTimeout:  60 * time.Second,
+	}
+}
+
+// Server hosts HTTP/3 and optional HTTP/1 fallback using the same handler.
+type Server struct {
+	handler http.Handler
+	cfg     Config
+
+	h3 *http3.Server
+	h1 *http.Server
+
+	h1Once sync.Once
+	h1Err  chan error
+}
+
+// New constructs a QUIC server wrapper for any net/http-compatible handler.
+func New(handler http.Handler, cfg Config) *Server {
+	if cfg.Addr == "" {
+		cfg.Addr = ":8443"
+	}
+	if cfg.HTTP1ReadTimeout == 0 {
+		cfg.HTTP1ReadTimeout = 5 * time.Second
+	}
+	if cfg.HTTP1WriteTimeout == 0 {
+		cfg.HTTP1WriteTimeout = 60 * time.Second
+	}
+	if cfg.HTTP1IdleTimeout == 0 {
+		cfg.HTTP1IdleTimeout = 60 * time.Second
+	}
+
+	s := &Server{
+		handler: handler,
+		cfg:     cfg,
+		h1Err:   make(chan error, 1),
+	}
+
+	s.h3 = &http3.Server{
+		Addr:    cfg.Addr,
+		Handler: handler,
+	}
+
+	if cfg.HTTP1Addr != "" {
+		s.h1 = &http.Server{
+			Addr:         cfg.HTTP1Addr,
+			Handler:      handler,
+			ReadTimeout:  cfg.HTTP1ReadTimeout,
+			WriteTimeout: cfg.HTTP1WriteTimeout,
+			IdleTimeout:  cfg.HTTP1IdleTimeout,
+		}
+	}
+
+	return s
+}
+
+// StartHTTP3 starts only the HTTP/3 listener.
+func (s *Server) StartHTTP3() error {
+	if s.cfg.CertFile == "" || s.cfg.KeyFile == "" {
+		return errors.New("quic: CertFile and KeyFile are required")
+	}
+	return s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+}
+
+// StartDual starts optional HTTP/1 fallback and HTTP/3 on QUIC.
+// HTTP/1 runs in a goroutine; HTTP/3 runs in the foreground.
+func (s *Server) StartDual() error {
+	if s.h1 == nil {
+		return errors.New("quic: HTTP1Addr is required for dual-stack mode")
+	}
+
+	s.h1Once.Do(func() {
+		go func() {
+			err := s.h1.ListenAndServe()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.h1Err <- err
+			}
+			close(s.h1Err)
+		}()
+	})
+
+	err := s.StartHTTP3()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// Shutdown gracefully stops HTTP/3 and optional HTTP/1 fallback servers.
+func (s *Server) Shutdown(ctx context.Context) error {
+	var errs []error
+
+	if s.h3 != nil {
+		if err := s.h3.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if s.h1 != nil {
+		if err := s.h1.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}

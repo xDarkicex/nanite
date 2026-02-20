@@ -46,14 +46,17 @@ Nanite achieves zero allocations on both static and param routes.
 go get github.com/xDarkicex/nanite
 # Optional websocket module
 go get github.com/xDarkicex/nanite/websocket
+# Optional QUIC / HTTP/3 module
+go get github.com/xDarkicex/nanite/quic
 ```
 
 ## Module Layout
 
 - `github.com/xDarkicex/nanite` — core router/framework (no websocket dependency in core package)
 - `github.com/xDarkicex/nanite/websocket` — optional websocket integration module
+- `github.com/xDarkicex/nanite/quic` — optional HTTP/3 (QUIC) transport module
 
-This keeps core focused and lets users opt into websocket functionality only when needed.
+This keeps core focused and lets users opt into websocket and HTTP/3 transport features only when needed.
 
 ## Quick Start
 
@@ -207,6 +210,33 @@ nanitews.Register(r, "/chat", func(conn *websocket.Conn, c *nanite.Context) {
         conn.WriteMessage(mt, msg)
     }
 })
+```
+
+## HTTP/3 (QUIC)
+
+```go
+import (
+    "net/http"
+
+    "github.com/xDarkicex/nanite"
+    nanitequic "github.com/xDarkicex/nanite/quic"
+)
+
+r := nanite.New()
+r.Get("/healthz", func(c *nanite.Context) {
+    c.String(http.StatusOK, "ok")
+})
+
+qs := nanitequic.New(r, nanitequic.Config{
+    Addr:     ":8443",
+    CertFile: "server.crt",
+    KeyFile:  "server.key",
+})
+
+// HTTP/3 only
+if err := qs.StartHTTP3(); err != nil {
+    panic(err)
+}
 ```
 
 ## Static Files
