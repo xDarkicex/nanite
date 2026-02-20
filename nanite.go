@@ -76,11 +76,12 @@ type Config struct {
 }
 
 type WebSocketConfig struct {
-	ReadTimeout    time.Duration // Timeout for reading messages
-	WriteTimeout   time.Duration // Timeout for writing messages
-	PingInterval   time.Duration // Interval for sending pings
-	MaxMessageSize int64         // Maximum message size in bytes
-	BufferSize     int           // Buffer size for read/write operations
+	ReadTimeout     time.Duration // Timeout for reading messages
+	WriteTimeout    time.Duration // Timeout for writing messages
+	PingInterval    time.Duration // Interval for sending pings
+	MaxMessageSize  int64         // Maximum message size in bytes
+	BufferSize      int           // Buffer size for read/write operations
+	AllowedOrigins  []string      // List of allowed origin patterns (empty means same-origin only)
 }
 
 type staticRoute struct {
@@ -192,9 +193,9 @@ func New() *Router {
 		}
 	}
 
-	// WebSocket configuration with permissive defaults
+	// WebSocket configuration with secure defaults
 	r.config.Upgrader = &websocket.Upgrader{
-		CheckOrigin:     func(*http.Request) bool { return true }, // Accept all origins
+		CheckOrigin:     r.websocketCheckOrigin,
 		ReadBufferSize:  r.config.WebSocket.BufferSize,
 		WriteBufferSize: r.config.WebSocket.BufferSize,
 	}
@@ -203,6 +204,81 @@ func New() *Router {
 	r.routeCache = NewLRUCache(r.config.RouteCacheSize, r.config.RouteMaxParams)
 
 	return r
+}
+
+// websocketCheckOrigin validates WebSocket origin headers for security.
+// Empty AllowedOrigins means same-origin only. Patterns support * wildcards.
+func (r *Router) websocketCheckOrigin(req *http.Request) bool {
+	origin := req.Header.Get("Origin")
+	host := req.Host
+
+	// If no origin header, allow (same-origin request)
+	if origin == "" {
+		return true
+	}
+
+	// If AllowedOrigins is configured, check against the list
+	if len(r.config.WebSocket.AllowedOrigins) > 0 {
+		for _, allowed := range r.config.WebSocket.AllowedOrigins {
+			if r.originMatches(origin, allowed) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default: allow if origin matches host (same-origin protection)
+	return origin == "http://"+host || origin == "https://"+host
+}
+
+// originMatches checks if an origin matches an allowed pattern with * wildcard support
+func (r *Router) originMatches(origin, pattern string) bool {
+	// Handle * wildcard patterns
+	if strings.Contains(pattern, "*") {
+		return r.matchWildcard(origin, pattern)
+	}
+	return origin == pattern
+}
+
+// matchWildcard performs wildcard matching for origin patterns
+func (r *Router) matchWildcard(origin, pattern string) bool {
+	origins := strings.Split(origin, "://")
+	patterns := strings.Split(pattern, "://")
+
+	if len(origins) != 2 || len(patterns) != 2 {
+		return false
+	}
+
+	// Check scheme
+	if patterns[0] != "*" && origins[0] != patterns[0] {
+		return false
+	}
+
+	// Check host with wildcard
+	return r.matchHostWildcard(origins[1], patterns[1])
+}
+
+// matchHostWildcard matches host patterns with * wildcards
+func (r *Router) matchHostWildcard(host, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+
+	// Handle multiple wildcards
+	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+		mid := strings.TrimSuffix(strings.TrimPrefix(pattern, "*"), "*")
+		return strings.Contains(host, mid)
+	}
+
+	if strings.HasPrefix(pattern, "*") {
+		return strings.HasSuffix(host, strings.TrimPrefix(pattern, "*"))
+	}
+
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(host, strings.TrimSuffix(pattern, "*"))
+	}
+
+	return host == pattern
 }
 
 func (r *Router) Use(middleware ...MiddlewareFunc) {
