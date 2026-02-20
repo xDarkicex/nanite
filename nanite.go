@@ -738,13 +738,24 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 
 	// Try parameter child
 	if n.paramChild != nil {
-		// Extract parameter value
+		// Extract parameter value - check for invalid chars during extraction
 		i := 0
+		hasInvalidSlash := false
 		for i < len(path) && path[i] != '/' {
+			if path[i] == '/' {
+				hasInvalidSlash = true
+				break
+			}
 			i++
 		}
 
 		paramValue := path[:i]
+
+		// Reject empty or invalid parameter values
+		if paramValue == "" || hasInvalidSlash {
+			return nil, nil
+		}
+
 		remainingPath := ""
 		if i < len(path) {
 			remainingPath = path[i:]
