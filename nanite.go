@@ -53,6 +53,30 @@ type Context struct {
 	finalHandler    HandlerFunc
 	middlewareIndex int
 	nextMiddleware  func()
+
+	// Reusable request-body wrapper for middleware that needs to preserve body reads.
+	reusedBody reusableRequestBody
+
+	// Tracked pooled maps to avoid iterating Values on every request cleanup.
+	pooledMapKeys   [4]string
+	pooledMapValues [4]map[string]interface{}
+	pooledMapCount  int
+}
+
+type reusableRequestBody struct {
+	reader bytes.Reader
+}
+
+func (r *reusableRequestBody) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *reusableRequestBody) Close() error {
+	return nil
+}
+
+func (r *reusableRequestBody) Reset(b []byte) {
+	r.reader.Reset(b)
 }
 
 type ValidationErrors []ValidationError
@@ -73,6 +97,7 @@ func (ve ValidationErrors) Error() string {
 type Config struct {
 	NotFoundHandler   HandlerFunc
 	ErrorHandler      func(*Context, error)
+	RecoverPanics     bool
 	Upgrader          *websocket.Upgrader
 	WebSocket         *WebSocketConfig
 	RouteCacheSize    int
@@ -97,11 +122,15 @@ type staticRoute struct {
 	params  []Param
 }
 
+const radixChildSlots = 256
+
+// RadixNode is an adaptive radix tree node optimized for HTTP routing.
+// Static children are addressed directly by first byte for O(1) lookup.
 type RadixNode struct {
 	prefix        string
 	handler       HandlerFunc
-	children      [256]*RadixNode // Fixed array for O(1) lookup by first byte
-	childCount    int             // Track number of children for iteration
+	children      [radixChildSlots]*RadixNode
+	childCount    int
 	paramChild    *RadixNode
 	wildcardChild *RadixNode
 	paramName     string
@@ -145,27 +174,31 @@ func (g *RouterGroup) Delete(path string, handler HandlerFunc, middleware ...Mid
 }
 
 type Router struct {
-	staticRoutes    map[string]map[string]staticRoute
-	trees           map[string]*RadixNode
-	routeCache      *LRUCache
-	Pool            sync.Pool // Exported for testing
-	middleware      []MiddlewareFunc
-	errorMiddleware []ErrorMiddlewareFunc
-	config          *Config
-	httpClient      *http.Client
-	server          *http.Server
-	shutdownHooks   []ShutdownHook
-	mutex           sync.RWMutex
-	groups          map[string]*RouterGroup
+	staticRoutes               map[string]map[string]staticRoute
+	trees                      map[string]*RadixNode
+	dynamicCounts              map[string]int
+	routeCache                 *LRUCache
+	Pool                       sync.Pool // Exported for testing
+	middleware                 []MiddlewareFunc
+	errorMiddleware            []ErrorMiddlewareFunc
+	config                     *Config
+	httpClient                 *http.Client
+	server                     *http.Server
+	shutdownHooks              []ShutdownHook
+	mutex                      sync.RWMutex
+	groups                     map[string]*RouterGroup
+	routeCacheMinDynamicRoutes int
 }
 type ShutdownHook func() error
 
 func New() *Router {
 	r := &Router{
-		trees:        make(map[string]*RadixNode),
-		staticRoutes: make(map[string]map[string]staticRoute),
-		groups:       make(map[string]*RouterGroup),
+		trees:         make(map[string]*RadixNode),
+		staticRoutes:  make(map[string]map[string]staticRoute),
+		dynamicCounts: make(map[string]int),
+		groups:        make(map[string]*RouterGroup),
 		config: &Config{
+			RecoverPanics: true,
 			WebSocket: &WebSocketConfig{
 				ReadTimeout:    60 * time.Second,
 				WriteTimeout:   10 * time.Second,
@@ -190,6 +223,7 @@ func New() *Router {
 			},
 			Timeout: 30 * time.Second,
 		},
+		routeCacheMinDynamicRoutes: 8,
 	}
 
 	// Context pool with memory-efficient initialization
@@ -521,6 +555,7 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 
 	// Insert into radix tree
 	root := r.trees[method]
+	r.dynamicCounts[method]++
 	if path == "" || path == "/" {
 		root.handler = wrapped
 	} else {
@@ -545,7 +580,8 @@ func (r *Router) findHandlerAndMiddlewareWithParams(method, path string, params 
 
 	// Second tier: check LRU cache before doing the more expensive radix tree lookup
 	// This avoids the cost of tree traversal for frequently used dynamic routes
-	if r.routeCache != nil {
+	useRouteCache := r.routeCache != nil && r.dynamicCounts[method] >= r.routeCacheMinDynamicRoutes
+	if useRouteCache {
 		if handler, params, found := r.routeCache.Get(method, path); found {
 			// Cache hit - strings are interned and params are pooled for efficiency
 			return handler, params
@@ -566,7 +602,7 @@ func (r *Router) findHandlerAndMiddlewareWithParams(method, path string, params 
 
 		// Cache successful lookups to speed up future requests
 		// The LRU handles memory management, parameter pooling, and string interning
-		if handler != nil && r.routeCache != nil {
+		if handler != nil && useRouteCache {
 			cachedParams := getParamSlice(len(params))
 			cachedParams = append(cachedParams, params...)
 			r.routeCache.Add(method, path, handler, cachedParams)
@@ -606,6 +642,11 @@ func writeDefaultNotFound(w http.ResponseWriter) {
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.config != nil && !r.config.RecoverPanics {
+		r.serveHTTPNoRecover(w, req)
+		return
+	}
+
 	// Get pooled response writers
 	trackedWriter := responseWriterPool.Get().(*TrackedResponseWriter)
 	trackedWriter.ResponseWriter = w
@@ -613,34 +654,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	trackedWriter.headerWritten = false
 	trackedWriter.bytesWritten = 0
 
-	// Get content type from response headers or request Accept header
-	contentType := w.Header().Get("Content-Type")
-	if contentType == "" {
-		contentType = req.Header.Get("Accept")
-		if contentType == "" || contentType == "*/*" {
-			contentType = "text/plain" // Default assumption
-		}
-	}
-
 	bufferedWriter := bufferedWriterPool.Get().(*BufferedResponseWriter)
 	bufferedWriter.TrackedResponseWriter = trackedWriter
 	bufferedWriter.autoFlush = true
 	bufferedWriter.buffer.Reset()
 	bufferedWriter.bufferSize = DefaultBufferSize
-
-	// Determine buffer size from content type without []byte conversions
-	contentType = strings.TrimSpace(contentType)
-	if semicolon := strings.IndexByte(contentType, ';'); semicolon >= 0 {
-		contentType = contentType[:semicolon]
-	}
-
-	if contentType != "" {
-		if strings.HasPrefix(contentType, "text/") || strings.HasPrefix(contentType, "application/json") {
-			bufferedWriter.bufferSize = TextBufferSize
-		} else {
-			bufferedWriter.bufferSize = BinaryBufferSize
-		}
-	}
 
 	// Get a context from the pool and initialize it with a single Reset call
 	ctx := r.Pool.Get().(*Context)
@@ -707,9 +725,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Make router configuration available to middleware
-	ctx.Values["routerConfig"] = r.config
-
 	// Execute the wrapped handler (already includes all middleware)
 	handler(ctx)
 
@@ -739,6 +754,76 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	bufferedWriter.Close()
 }
 
+func (r *Router) serveHTTPNoRecover(w http.ResponseWriter, req *http.Request) {
+	trackedWriter := responseWriterPool.Get().(*TrackedResponseWriter)
+	trackedWriter.ResponseWriter = w
+	trackedWriter.statusCode = http.StatusOK
+	trackedWriter.headerWritten = false
+	trackedWriter.bytesWritten = 0
+
+	bufferedWriter := bufferedWriterPool.Get().(*BufferedResponseWriter)
+	bufferedWriter.TrackedResponseWriter = trackedWriter
+	bufferedWriter.autoFlush = true
+	bufferedWriter.buffer.Reset()
+	bufferedWriter.bufferSize = DefaultBufferSize
+
+	ctx := r.Pool.Get().(*Context)
+	ctx.Reset(bufferedWriter, req)
+
+	cleanup := func() {
+		ctx.CleanupPooledResources()
+		r.Pool.Put(ctx)
+		bufferedWriterPool.Put(bufferedWriter)
+		responseWriterPool.Put(trackedWriter)
+	}
+
+	var paramsBuf [10]Param
+	handler, params := r.findHandlerAndMiddlewareWithParams(req.Method, req.URL.Path, paramsBuf[:0])
+
+	for i, p := range params {
+		if i < len(ctx.Params) {
+			ctx.Params[i] = p
+		}
+	}
+	ctx.ParamsCount = len(params)
+
+	if handler == nil {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
+		}
+		bufferedWriter.Close()
+		cleanup()
+		return
+	}
+
+	handler(ctx)
+
+	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
+		r.mutex.RLock()
+		hasErrorMiddleware := len(r.errorMiddleware) > 0
+		r.mutex.RUnlock()
+
+		if hasErrorMiddleware {
+			r.mutex.RLock()
+			executeErrorMiddlewareChain(err, ctx, r.errorMiddleware)
+			r.mutex.RUnlock()
+		} else if r.config.ErrorHandler != nil {
+			r.config.ErrorHandler(ctx, err)
+		}
+	} else if ctx.IsAborted() && !trackedWriter.Written() {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
+		}
+	}
+
+	bufferedWriter.Close()
+	cleanup()
+}
+
 //go:inline
 func longestCommonPrefix(a, b string) int {
 	max := len(a)
@@ -755,6 +840,18 @@ func longestCommonPrefix(a, b string) int {
 	return max
 }
 
+func (n *RadixNode) findChild(key byte) *RadixNode {
+	return n.children[key]
+}
+
+// addChild adds a child node with the given key.
+func (n *RadixNode) addChild(key byte, child *RadixNode) {
+	if n.children[key] == nil {
+		n.childCount++
+	}
+	n.children[key] = child
+}
+
 // findRoute searches for a route in the radix tree.
 func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param) {
 	// Base case: empty path
@@ -762,11 +859,11 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 		return n.handler, params
 	}
 
-	// Try static children first - O(1) array lookup
+	// Try static children first.
 	if len(path) > 0 {
 		firstByte := path[0]
-		child := n.children[firstByte]
-		if child != nil && strings.HasPrefix(path, child.prefix) {
+		child := n.findChild(firstByte)
+		if child != nil && len(child.prefix) > 0 && len(path) >= len(child.prefix) && path[:len(child.prefix)] == child.prefix {
 			// Remove the prefix from the path
 			subPath := path[len(child.prefix):]
 
@@ -920,16 +1017,15 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		return
 	}
 
-	// Look for matching child - O(1) array lookup
+	// Look for matching child.
 	firstByte := segment[0]
-	c := n.children[firstByte]
+	c := n.findChild(firstByte)
 	if c == nil {
 		// Create new child
 		c = &RadixNode{
 			prefix: segment,
 		}
-		n.children[firstByte] = c
-		n.childCount++
+		n.addChild(firstByte, c)
 
 		// Set handler or continue with remaining path
 		if remainingPath == "" {
@@ -974,6 +1070,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		// Reset the original child
 		c.prefix = c.prefix[:commonPrefixLen]
 		c.handler = nil
+		c.children = [radixChildSlots]*RadixNode{}
 		c.childCount = 0
 		c.paramChild = nil
 		c.wildcardChild = nil
@@ -983,8 +1080,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 
 		// Add the split node as a child
 		childFirstByte := child.prefix[0]
-		c.children[childFirstByte] = child
-		c.childCount = 1
+		c.addChild(childFirstByte, child)
 
 		// Handle current path
 		if commonPrefixLen == len(segment) {
@@ -1007,8 +1103,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			}
 
 			newFirstByte := newChild.prefix[0]
-			c.children[newFirstByte] = newChild
-			c.childCount++
+			c.addChild(newFirstByte, newChild)
 		}
 	}
 
@@ -1018,12 +1113,14 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 // updateDepth recalculates the max depth of this node's subtree
 func (n *RadixNode) updateDepth() {
 	maxChildDepth := 0
-	for i := 0; i < len(n.children); i++ {
+
+	for i := 0; i < radixChildSlots; i++ {
 		child := n.children[i]
 		if child != nil && child.maxDepth > maxChildDepth {
 			maxChildDepth = child.maxDepth
 		}
 	}
+
 	if n.paramChild != nil && n.paramChild.maxDepth > maxChildDepth {
 		maxChildDepth = n.paramChild.maxDepth
 	}

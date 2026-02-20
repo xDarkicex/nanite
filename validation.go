@@ -449,8 +449,8 @@ func JSONParsingMiddleware(config *JSONParsingConfig) MiddlewareFunc {
 		// Handle empty bodies
 		if ctx.Request.ContentLength == 0 {
 			if cfg.AllowEmptyBody {
-				// Use an empty object for empty bodies
-				ctx.Values[cfg.TargetKey] = make(map[string]interface{})
+				// Use pooled map for empty object
+				ctx.setPooledMap(cfg.TargetKey, getMap())
 				next()
 				return
 			} else {
@@ -465,15 +465,50 @@ func JSONParsingMiddleware(config *JSONParsingConfig) MiddlewareFunc {
 			}
 		}
 
-		// Create a limited reader to prevent DoS from excessively large bodies
-		limitedBody := io.LimitReader(ctx.Request.Body, cfg.MaxSize)
+		// Read the body into a pooled buffer with a hard upper bound.
+		readBytes, readErr := io.CopyN(buffer, ctx.Request.Body, cfg.MaxSize+1)
+		if readErr != nil && readErr != io.EOF {
+			if cfg.ErrorHandler != nil {
+				cfg.ErrorHandler(ctx, readErr)
+			} else {
+				ctx.JSON(http.StatusBadRequest, map[string]interface{}{
+					"error": "invalid request body",
+				})
+			}
+			return
+		}
 
-		// Use TeeReader to simultaneously read the body once while writing to buffer
-		teeBody := io.TeeReader(limitedBody, buffer)
+		if readBytes > cfg.MaxSize {
+			if cfg.ErrorHandler != nil {
+				cfg.ErrorHandler(ctx, fmt.Errorf("request body too large"))
+			} else {
+				ctx.JSON(http.StatusRequestEntityTooLarge, map[string]interface{}{
+					"error": "request body too large",
+				})
+			}
+			return
+		}
 
-		// Parse the JSON directly from the tee reader
-		var body map[string]interface{}
-		if err := json.NewDecoder(teeBody).Decode(&body); err != nil {
+		if readBytes == 0 {
+			if cfg.AllowEmptyBody {
+				ctx.setPooledMap(cfg.TargetKey, getMap())
+				next()
+				return
+			}
+			if cfg.ErrorHandler != nil {
+				cfg.ErrorHandler(ctx, fmt.Errorf("empty request body not allowed"))
+			} else {
+				ctx.JSON(http.StatusBadRequest, map[string]interface{}{
+					"error": "empty request body not allowed",
+				})
+			}
+			return
+		}
+
+		// Parse the JSON from the buffered bytes.
+		body := getMap()
+		if err := json.Unmarshal(buffer.Bytes(), &body); err != nil {
+			putMap(body)
 			if cfg.ErrorHandler != nil {
 				cfg.ErrorHandler(ctx, err)
 			} else {
@@ -486,10 +521,11 @@ func JSONParsingMiddleware(config *JSONParsingConfig) MiddlewareFunc {
 
 		// Close original body and replace with buffered copy for downstream handlers
 		ctx.Request.Body.Close()
-		ctx.Request.Body = io.NopCloser(bytes.NewReader(buffer.Bytes()))
+		ctx.reusedBody.Reset(buffer.Bytes())
+		ctx.Request.Body = &ctx.reusedBody
 
 		// Store parsed body in context with the configured key
-		ctx.Values[cfg.TargetKey] = body
+		ctx.setPooledMap(cfg.TargetKey, body)
 
 		// Proceed to the next middleware or handler
 		next()

@@ -235,9 +235,19 @@ func (c *Context) Reset(w http.ResponseWriter, r *http.Request) {
 	c.middlewareChain = nil
 	c.finalHandler = nil
 	c.middlewareIndex = 0
+	c.pooledMapCount = 0
 	clear(c.Values)
 	// Don't clear lazyFields - reuse them across requests
 	c.ValidationErrs = nil
+}
+
+func (c *Context) setPooledMap(key string, m map[string]interface{}) {
+	c.Values[key] = m
+	if c.pooledMapCount < len(c.pooledMapKeys) {
+		c.pooledMapKeys[c.pooledMapCount] = key
+		c.pooledMapValues[c.pooledMapCount] = m
+		c.pooledMapCount++
+	}
 }
 
 // runMiddlewareChain executes middleware without allocating a new "next" closure per layer.
@@ -274,13 +284,15 @@ func (c *Context) CheckValidation() bool {
 
 // CleanupPooledResources returns all pooled resources to their respective pools
 func (c *Context) CleanupPooledResources() {
-	// Clean up maps from Values
-	for k, v := range c.Values {
-		if m, ok := v.(map[string]interface{}); ok {
+	// Return pooled maps without scanning the entire values map.
+	for i := 0; i < c.pooledMapCount; i++ {
+		if m := c.pooledMapValues[i]; m != nil {
 			putMap(m)
+			c.pooledMapValues[i] = nil
 		}
-		delete(c.Values, k)
+		c.pooledMapKeys[i] = ""
 	}
+	clear(c.Values)
 
 	// Clean up lazy fields
 	c.ClearLazyFields()

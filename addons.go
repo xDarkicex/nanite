@@ -191,7 +191,7 @@ func ValidationMiddleware(chains ...*ValidationChain) MiddlewareFunc {
 						formData[key] = values
 					}
 				}
-				ctx.Values["formData"] = formData
+				ctx.setPooledMap("formData", formData)
 			} else if strings.HasPrefix(contentType, "application/json") {
 				originalBody := ctx.Request.Body
 				defer func() {
@@ -241,7 +241,7 @@ func ValidationMiddleware(chains ...*ValidationChain) MiddlewareFunc {
 				}
 
 				ctx.Request.Body = io.NopCloser(bytes.NewReader(buffer.Bytes()))
-				ctx.Values["body"] = body
+				ctx.setPooledMap("body", body)
 			} else {
 				// Unsupported content type - skip validation, continue to handler
 				next()
@@ -426,36 +426,47 @@ func (w *TrackedResponseWriter) Push(target string, opts *http.PushOptions) erro
 
 // ### LRU Implementation
 
-// routeCacheKey uniquely identifies an entry in the LRU cache.
-// It combines HTTP method and path to form a composite key.
+// routeCacheKey uniquely identifies an entry in method/path fallback maps.
 type routeCacheKey struct {
-	method string // HTTP method (GET, POST, etc.)
-	path   string // Request path
+	method string
+	path   string
 }
 
-// entry represents a single item in the LRU cache.
-// It contains the cached data and pointers for the doubly-linked list.
 type entry struct {
-	key     routeCacheKey // The cache key (method + path)
-	handler HandlerFunc   // The handler function for this route
-	params  []Param       // Route parameters
-	prev    int           // Index of the previous entry in the doubly-linked list
-	next    int           // Index of the next entry in the doubly-linked list
+	key              routeCacheKey
+	handler          HandlerFunc
+	params           []Param
+	prev             int
+	next             int
+	hitsSincePromote uint32
 }
 
-// LRUCache implements a thread-safe least recently used cache with fixed capacity.
-// It uses an array-based doubly-linked list for O(1) LRU operations and maintains
-// hit/miss statistics for performance monitoring.
+type lruShard struct {
+	capacity int
+	maxParams int
+	mutex    sync.RWMutex
+	entries  []entry
+	head     int
+	tail     int
+	hits     int64
+	misses   int64
+
+	getIndices     map[string]int
+	postIndices    map[string]int
+	putIndices     map[string]int
+	deleteIndices  map[string]int
+	patchIndices   map[string]int
+	headIndices    map[string]int
+	optionsIndices map[string]int
+	otherIndices   map[routeCacheKey]int
+
+	promoteMask uint32
+}
+
+// LRUCache uses sharded LRUs to reduce lock contention on hot request paths.
 type LRUCache struct {
-	capacity  int                   // Maximum number of entries the cache can hold
-	mutex     sync.RWMutex          // Read-write mutex for thread safety
-	entries   []entry               // Array of cache entries
-	indices   map[routeCacheKey]int // Map from key to index in entries
-	head      int                   // Index of the most recently used entry
-	tail      int                   // Index of the least recently used entry
-	hits      int64                 // Number of cache hits (atomic counter)
-	misses    int64                 // Number of cache misses (atomic counter)
-	maxParams int                   // Configurable max parameters per entry
+	shards    []lruShard
+	shardMask uint32
 }
 
 // nextPowerOfTwo rounds up to the next power of two.
@@ -556,7 +567,33 @@ func internString(s string) string {
 	return s
 }
 
-// NewLRUCache creates a new LRU cache with the specified capacity and maxParams.
+const routeCacheShardCount = 16
+
+func makeShard(capacity, maxParams int) lruShard {
+	s := lruShard{
+		capacity:       capacity,
+		maxParams:      maxParams,
+		entries:        make([]entry, capacity),
+		head:           0,
+		tail:           capacity - 1,
+		getIndices:     make(map[string]int, capacity),
+		postIndices:    make(map[string]int, capacity/8+1),
+		putIndices:     make(map[string]int, capacity/8+1),
+		deleteIndices:  make(map[string]int, capacity/8+1),
+		patchIndices:   make(map[string]int, capacity/16+1),
+		headIndices:    make(map[string]int, capacity/16+1),
+		optionsIndices: make(map[string]int, capacity/16+1),
+		otherIndices:   make(map[routeCacheKey]int, capacity/8+1),
+		promoteMask:    7,
+	}
+	for i := 0; i < capacity; i++ {
+		s.entries[i].next = (i + 1) % capacity
+		s.entries[i].prev = (i - 1 + capacity) % capacity
+	}
+	return s
+}
+
+// NewLRUCache creates a sharded LRU cache with the specified capacity and maxParams.
 func NewLRUCache(capacity, maxParams int) *LRUCache {
 	// Set defaults if invalid values provided
 	if capacity <= 0 {
@@ -574,91 +611,168 @@ func NewLRUCache(capacity, maxParams int) *LRUCache {
 		maxParams = 10 // Default max parameters
 	}
 
+	if maxParams <= 0 {
+		maxParams = 10 // Default max parameters
+	}
+	perShardCapacity := capacity / routeCacheShardCount
+	if perShardCapacity < 64 {
+		perShardCapacity = 64
+	}
+	perShardCapacity = nextPowerOfTwo(perShardCapacity)
+
 	c := &LRUCache{
-		capacity:  capacity,
-		maxParams: maxParams,
-		entries:   make([]entry, capacity),
-		indices:   make(map[routeCacheKey]int, capacity*2), // Oversize to avoid rehashing
-		head:      0,
-		tail:      capacity - 1,
+		shards:    make([]lruShard, routeCacheShardCount),
+		shardMask: routeCacheShardCount - 1,
 	}
-
-	// Initialize the circular doubly-linked list
-	for i := 0; i < capacity; i++ {
-		c.entries[i].next = (i + 1) % capacity
-		c.entries[i].prev = (i - 1 + capacity) % capacity
+	for i := 0; i < routeCacheShardCount; i++ {
+		c.shards[i] = makeShard(perShardCapacity, maxParams)
 	}
-
 	return c
 }
 
-func (c *LRUCache) Add(method, path string, handler HandlerFunc, params []Param) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	key := routeCacheKey{method: method, path: path}
+func (s *lruShard) indexMapForMethod(method string) map[string]int {
+	switch method {
+	case "GET":
+		return s.getIndices
+	case "POST":
+		return s.postIndices
+	case "PUT":
+		return s.putIndices
+	case "DELETE":
+		return s.deleteIndices
+	case "PATCH":
+		return s.patchIndices
+	case "HEAD":
+		return s.headIndices
+	case "OPTIONS":
+		return s.optionsIndices
+	default:
+		return nil
+	}
+}
+
+func (s *lruShard) getIndex(method, path string) (int, bool) {
+	if m := s.indexMapForMethod(method); m != nil {
+		idx, ok := m[path]
+		return idx, ok
+	}
+	idx, ok := s.otherIndices[routeCacheKey{method: method, path: path}]
+	return idx, ok
+}
+
+func (s *lruShard) setIndex(method, path string, idx int) {
+	if m := s.indexMapForMethod(method); m != nil {
+		m[path] = idx
+		return
+	}
+	s.otherIndices[routeCacheKey{method: method, path: path}] = idx
+}
+
+func (s *lruShard) deleteIndex(method, path string) {
+	if m := s.indexMapForMethod(method); m != nil {
+		delete(m, path)
+		return
+	}
+	delete(s.otherIndices, routeCacheKey{method: method, path: path})
+}
+
+//go:inline
+func hashRouteKey(method, path string) uint32 {
+	// FNV-1a variant tuned for short strings.
+	h := uint32(2166136261)
+	for i := 0; i < len(method); i++ {
+		h ^= uint32(method[i])
+		h *= 16777619
+	}
+	h ^= uint32('/')
+	h *= 16777619
+	for i := 0; i < len(path); i++ {
+		h ^= uint32(path[i])
+		h *= 16777619
+	}
+	return h
+}
+
+//go:inline
+func (c *LRUCache) shardFor(method, path string) *lruShard {
+	return &c.shards[hashRouteKey(method, path)&c.shardMask]
+}
+
+func (s *lruShard) Add(method, path string, handler HandlerFunc, params []Param) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 
 	// Check if the key already exists
-	if idx, exists := c.indices[key]; exists {
-		entry := &c.entries[idx]
+	if idx, exists := s.getIndex(method, path); exists {
+		entry := &s.entries[idx]
 		if entry.params != nil {
 			putParamSlice(entry.params)
 		}
 		entry.handler = handler
 		entry.params = params // Store params directly
-		c.moveToFront(idx)
+		entry.hitsSincePromote = 0
+		s.moveToFront(idx)
 		return
 	}
 
-	idx := c.tail
-	entry := &c.entries[idx]
+	idx := s.tail
+	entry := &s.entries[idx]
 	oldKey := entry.key
 	if oldKey.method != "" || oldKey.path != "" {
-		delete(c.indices, oldKey)
+		s.deleteIndex(oldKey.method, oldKey.path)
 	}
 	if entry.params != nil {
 		putParamSlice(entry.params)
 	}
 
-	entry.key = key
+	entry.key = routeCacheKey{method: method, path: path}
 	entry.handler = handler
 	entry.params = params
-	c.indices[key] = idx
-	c.moveToFront(idx)
+	entry.hitsSincePromote = 0
+	s.setIndex(method, path, idx)
+	s.moveToFront(idx)
 }
 
-func (c *LRUCache) Get(method, path string) (HandlerFunc, []Param, bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("Recovered from panic in Get: %v\n", r)
-			return
-		}
-	}()
+func (c *LRUCache) Add(method, path string, handler HandlerFunc, params []Param) {
+	c.shardFor(method, path).Add(method, path, handler, params)
+}
 
-	// Fast path: read-only lock for lookup
-	c.mutex.RLock()
-	idx, exists := c.indices[routeCacheKey{method: method, path: path}]
+func (s *lruShard) Get(method, path string) (HandlerFunc, []Param, bool) {
+	s.mutex.RLock()
+	idx, exists := s.getIndex(method, path)
 	if !exists {
-		atomic.AddInt64(&c.misses, 1)
-		c.mutex.RUnlock()
+		atomic.AddInt64(&s.misses, 1)
+		s.mutex.RUnlock()
 		return nil, nil, false
 	}
 
-	entry := &c.entries[idx]
+	entry := &s.entries[idx]
 	handler := entry.handler
 	params := entry.params // Return cached params directly (caller must not modify)
+	promoteMask := atomic.LoadUint32(&s.promoteMask)
+	promote := atomic.AddUint32(&entry.hitsSincePromote, 1)&promoteMask == 0
 
-	c.mutex.RUnlock()
+	s.mutex.RUnlock()
 
-	// Move to front (write lock only for this)
-	c.mutex.Lock()
-	c.moveToFront(idx)
-	c.mutex.Unlock()
+	if promote {
+		// Sampled promotion keeps LRU quality while reducing write lock pressure.
+		s.mutex.Lock()
+		if currentIdx, ok := s.getIndex(method, path); ok && currentIdx == idx {
+			s.entries[idx].hitsSincePromote = 0
+			s.moveToFront(idx)
+		}
+		s.mutex.Unlock()
+	}
 
-	atomic.AddInt64(&c.hits, 1)
+	atomic.AddInt64(&s.hits, 1)
 	return handler, params, true
 }
 
-func (c *LRUCache) moveToFront(idx int) {
+func (c *LRUCache) Get(method, path string) (HandlerFunc, []Param, bool) {
+	return c.shardFor(method, path).Get(method, path)
+}
+
+func (s *lruShard) moveToFront(idx int) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("Recovered from panic in moveToFront: %v\n", r)
@@ -666,72 +780,99 @@ func (c *LRUCache) moveToFront(idx int) {
 	}()
 
 	// Already at front, nothing to do
-	if idx == c.head {
+	if idx == s.head {
 		return
 	}
 
 	// Safety check for invalid index
-	if idx < 0 || idx >= c.capacity {
-		fmt.Printf("Warning: Attempted to move invalid index %d in LRU cache with capacity %d\n", idx, c.capacity)
+	if idx < 0 || idx >= s.capacity {
+		fmt.Printf("Warning: Attempted to move invalid index %d in LRU cache with capacity %d\n", idx, s.capacity)
 		return
 	}
 
 	// Remove from current position
-	entry := &c.entries[idx]
+	entry := &s.entries[idx]
 	prevIdx := entry.prev
 	nextIdx := entry.next
-	c.entries[prevIdx].next = nextIdx
-	c.entries[nextIdx].prev = prevIdx
+	s.entries[prevIdx].next = nextIdx
+	s.entries[nextIdx].prev = prevIdx
 	// Update tail if we moved the tail
-	if idx == c.tail {
-		c.tail = prevIdx
+	if idx == s.tail {
+		s.tail = prevIdx
 	}
 
 	// Insert at front
-	oldHead := c.head
-	oldHeadPrev := c.entries[oldHead].prev
+	oldHead := s.head
+	oldHeadPrev := s.entries[oldHead].prev
 	entry.next = oldHead
 	entry.prev = oldHeadPrev
-	c.entries[oldHead].prev = idx
-	c.entries[oldHeadPrev].next = idx
+	s.entries[oldHead].prev = idx
+	s.entries[oldHeadPrev].next = idx
 	// Update head
-	c.head = idx
+	s.head = idx
+}
+
+func (s *lruShard) Clear() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	for i := range s.entries {
+		if s.entries[i].params != nil {
+			putParamSlice(s.entries[i].params)
+			s.entries[i].params = nil
+		}
+		s.entries[i].key = routeCacheKey{}
+		s.entries[i].handler = nil
+	}
+
+	clear(s.getIndices)
+	clear(s.postIndices)
+	clear(s.putIndices)
+	clear(s.deleteIndices)
+	clear(s.patchIndices)
+	clear(s.headIndices)
+	clear(s.optionsIndices)
+	clear(s.otherIndices)
+	s.head = 0
+	s.tail = s.capacity - 1
+	for i := 0; i < s.capacity; i++ {
+		s.entries[i].next = (i + 1) % s.capacity
+		s.entries[i].prev = (i - 1 + s.capacity) % s.capacity
+	}
+
+	atomic.StoreInt64(&s.hits, 0)
+	atomic.StoreInt64(&s.misses, 0)
 }
 
 func (c *LRUCache) Clear() {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("Recovered from panic in Clear: %v\n", r)
-		}
-	}()
-
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	for i := range c.entries {
-		if c.entries[i].params != nil {
-			putParamSlice(c.entries[i].params)
-			c.entries[i].params = nil
-		}
-		c.entries[i].key = routeCacheKey{}
-		c.entries[i].handler = nil
+	for i := range c.shards {
+		c.shards[i].Clear()
 	}
+}
 
-	c.indices = make(map[routeCacheKey]int, c.capacity*2)
-	c.head = 0
-	c.tail = c.capacity - 1
-	// Re-initialize the linked list
-	for i := 0; i < c.capacity; i++ {
-		c.entries[i].next = (i + 1) % c.capacity
-		c.entries[i].prev = (i - 1 + c.capacity) % c.capacity
+// SetPromoteEvery configures sampled promotion frequency.
+// Value is rounded up to next power of two and clamped to [1, 1024].
+func (c *LRUCache) SetPromoteEvery(n uint32) {
+	if n == 0 {
+		n = 1
 	}
-
-	atomic.StoreInt64(&c.hits, 0)
-	atomic.StoreInt64(&c.misses, 0)
+	if n > 1024 {
+		n = 1024
+	}
+	// Round up to power of two for mask-based sampling.
+	p := uint32(1)
+	for p < n {
+		p <<= 1
+	}
+	for i := range c.shards {
+		atomic.StoreUint32(&c.shards[i].promoteMask, p-1)
+	}
 }
 
 func (c *LRUCache) Stats() (hits, misses int64, ratio float64) {
-	hits = atomic.LoadInt64(&c.hits)
-	misses = atomic.LoadInt64(&c.misses)
+	for i := range c.shards {
+		hits += atomic.LoadInt64(&c.shards[i].hits)
+		misses += atomic.LoadInt64(&c.shards[i].misses)
+	}
 	total := hits + misses
 	if total > 0 {
 		ratio = float64(hits) / float64(total)
@@ -754,6 +895,34 @@ func (r *Router) SetRouteCacheOptions(size, maxParams int) {
 	} else {
 		r.routeCache = NewLRUCache(size, maxParams)
 	}
+}
+
+// SetRouteCacheTuning adjusts cache behavior for hit-path contention and usefulness.
+// promoteEvery controls sampled hit promotion frequency.
+// minDynamicRoutes controls minimum dynamic routes per method before cache is used.
+func (r *Router) SetRouteCacheTuning(promoteEvery, minDynamicRoutes int) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if minDynamicRoutes < 0 {
+		minDynamicRoutes = 0
+	}
+	r.routeCacheMinDynamicRoutes = minDynamicRoutes
+
+	if r.routeCache != nil {
+		r.routeCache.SetPromoteEvery(uint32(promoteEvery))
+	}
+}
+
+// SetPanicRecovery controls whether ServeHTTP recovers panics and returns 500s.
+// Disabling recovery removes defer/recover overhead from the hot path.
+func (r *Router) SetPanicRecovery(enabled bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.config == nil {
+		r.config = &Config{}
+	}
+	r.config.RecoverPanics = enabled
 }
 
 const (
@@ -873,6 +1042,11 @@ func (w *BufferedResponseWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 
+	// Fast path for small single writes: avoid buffer and content-type logic.
+	if w.buffer.Len() == 0 && len(b) <= 1024 {
+		return w.TrackedResponseWriter.Write(b)
+	}
+
 	// Get current content type after headers are written
 	contentType := w.Header().Get("Content-Type")
 	isTextBased := strings.HasPrefix(contentType, "text/") ||
@@ -885,9 +1059,7 @@ func (w *BufferedResponseWriter) Write(b []byte) (int, error) {
 		if w.buffer.Len() > 0 {
 			w.Flush()
 		}
-		n, err := w.TrackedResponseWriter.Write(b)
-		w.bytesWritten += int64(n)
-		return n, err
+		return w.TrackedResponseWriter.Write(b)
 	}
 
 	// If this write would exceed buffer size, flush first
@@ -896,7 +1068,6 @@ func (w *BufferedResponseWriter) Write(b []byte) (int, error) {
 	}
 
 	n, err := w.buffer.Write(b)
-	w.bytesWritten += int64(n)
 
 	// Adaptive flushing strategy based on content type
 	if w.autoFlush {

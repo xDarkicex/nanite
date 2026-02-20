@@ -2,7 +2,6 @@ package nanite_test
 
 import (
 	"bytes"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +12,10 @@ import (
 type benchmarkResponseWriter struct {
 	header http.Header
 	code   int
+}
+
+type benchmarkRequestBody struct {
+	reader bytes.Reader
 }
 
 func newBenchmarkResponseWriter() *benchmarkResponseWriter {
@@ -41,6 +44,18 @@ func (w *benchmarkResponseWriter) Reset() {
 	w.code = 0
 }
 
+func (b *benchmarkRequestBody) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *benchmarkRequestBody) Close() error {
+	return nil
+}
+
+func (b *benchmarkRequestBody) Reset(payload []byte) {
+	b.reader.Reset(payload)
+}
+
 // --------- Test Handlers ---------
 // Simple handler that does nothing
 func noopHandler(ctx *nanite.Context) {}
@@ -57,8 +72,12 @@ func multiParamHandler(ctx *nanite.Context) {
 }
 
 // JSON response handler
+var jsonResponseOK = []byte(`{"status":"ok"}`)
+
 func jsonHandler(ctx *nanite.Context) {
-	ctx.JSON(http.StatusOK, map[string]interface{}{"status": "ok"})
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.WriteHeader(http.StatusOK)
+	_, _ = ctx.Writer.Write(jsonResponseOK)
 }
 
 // --------- Test Middleware ---------
@@ -239,9 +258,11 @@ func BenchmarkJSONHandling(b *testing.B) {
 		req := httptest.NewRequest("POST", "/api/users", nil)
 		req.Header.Set("Content-Type", "application/json")
 		payload := []byte(jsonBody)
+		body := &benchmarkRequestBody{}
 
 		for i := 0; i < b.N; i++ {
-			req.Body = io.NopCloser(bytes.NewReader(payload))
+			body.Reset(payload)
+			req.Body = body
 			req.ContentLength = int64(len(payload))
 			w.Reset()
 			router.ServeHTTP(w, req)
