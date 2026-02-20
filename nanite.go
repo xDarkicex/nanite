@@ -92,11 +92,13 @@ type staticRoute struct {
 type RadixNode struct {
 	prefix        string
 	handler       HandlerFunc
-	children      map[byte]*RadixNode
+	children      [256]*RadixNode // Fixed array for O(1) lookup by first byte
+	childCount    int             // Track number of children for iteration
 	paramChild    *RadixNode
 	wildcardChild *RadixNode
 	paramName     string
 	wildcardName  string
+	maxDepth      int // Track subtree depth for rebalancing
 }
 
 type RouterGroup struct {
@@ -493,8 +495,7 @@ func (r *Router) addRoute(method, path string, handler HandlerFunc, middleware .
 	// Only dynamic routes go in the radix tree
 	if _, exists := r.trees[method]; !exists {
 		r.trees[method] = &RadixNode{
-			prefix:   "",
-			children: make(map[byte]*RadixNode),
+			prefix: "",
 		}
 	}
 
@@ -717,21 +718,21 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 		return n.handler, params
 	}
 
-	// Try static children first
+	// Try static children first - O(1) array lookup
 	if len(path) > 0 {
-		if child, exists := n.children[path[0]]; exists {
-			if strings.HasPrefix(path, child.prefix) {
-				// Remove the prefix from the path
-				subPath := path[len(child.prefix):]
+		firstByte := path[0]
+		child := n.children[firstByte]
+		if child != nil && strings.HasPrefix(path, child.prefix) {
+			// Remove the prefix from the path
+			subPath := path[len(child.prefix):]
 
-				// IMPORTANT: Remove leading slash if present
-				if len(subPath) > 0 && subPath[0] == '/' {
-					subPath = subPath[1:]
-				}
+			// IMPORTANT: Remove leading slash if present
+			if len(subPath) > 0 && subPath[0] == '/' {
+				subPath = subPath[1:]
+			}
 
-				if handler, subParams := child.findRoute(subPath, params); handler != nil {
-					return handler, subParams
-				}
+			if handler, subParams := child.findRoute(subPath, params); handler != nil {
+				return handler, subParams
 			}
 		}
 	}
@@ -795,6 +796,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 	// Base case: empty path
 	if path == "" {
 		n.handler = handler
+		n.updateDepth()
 		return
 	}
 
@@ -817,7 +819,6 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			n.paramChild = &RadixNode{
 				prefix:    ":" + paramName,
 				paramName: paramName,
-				children:  make(map[byte]*RadixNode),
 			}
 		}
 
@@ -828,6 +829,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			n.paramChild.insertRoute(remainingPath, handler)
 		}
 
+		n.updateDepth()
 		return
 	}
 
@@ -837,8 +839,8 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			prefix:       path,
 			handler:      handler,
 			wildcardName: path[1:],
-			children:     make(map[byte]*RadixNode),
 		}
+		n.updateDepth()
 		return
 	}
 
@@ -870,18 +872,20 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		}
 		// If no remaining path, set handler on current node
 		n.handler = handler
+		n.updateDepth()
 		return
 	}
 
-	// Look for matching child
-	c, exists := n.children[segment[0]]
-	if !exists {
+	// Look for matching child - O(1) array lookup
+	firstByte := segment[0]
+	c := n.children[firstByte]
+	if c == nil {
 		// Create new child
 		c = &RadixNode{
-			prefix:   segment,
-			children: make(map[byte]*RadixNode),
+			prefix: segment,
 		}
-		n.children[segment[0]] = c
+		n.children[firstByte] = c
+		n.childCount++
 
 		// Set handler or continue with remaining path
 		if remainingPath == "" {
@@ -889,6 +893,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		} else {
 			c.insertRoute(remainingPath, handler)
 		}
+		n.updateDepth()
 		return
 	}
 
@@ -914,23 +919,28 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			prefix:        c.prefix[commonPrefixLen:],
 			handler:       c.handler,
 			children:      c.children,
+			childCount:    c.childCount,
 			paramChild:    c.paramChild,
 			wildcardChild: c.wildcardChild,
 			paramName:     c.paramName,
 			wildcardName:  c.wildcardName,
+			maxDepth:      c.maxDepth,
 		}
 
 		// Reset the original child
 		c.prefix = c.prefix[:commonPrefixLen]
 		c.handler = nil
-		c.children = make(map[byte]*RadixNode)
+		c.childCount = 0
 		c.paramChild = nil
 		c.wildcardChild = nil
 		c.paramName = ""
 		c.wildcardName = ""
+		c.maxDepth = 0
 
 		// Add the split node as a child
-		c.children[child.prefix[0]] = child
+		childFirstByte := child.prefix[0]
+		c.children[childFirstByte] = child
+		c.childCount = 1
 
 		// Handle current path
 		if commonPrefixLen == len(segment) {
@@ -943,8 +953,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		} else {
 			// Current segment extends beyond common prefix
 			newChild := &RadixNode{
-				prefix:   segment[commonPrefixLen:],
-				children: make(map[byte]*RadixNode),
+				prefix: segment[commonPrefixLen:],
 			}
 
 			if remainingPath == "" {
@@ -953,7 +962,29 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 				newChild.insertRoute(remainingPath, handler)
 			}
 
-			c.children[newChild.prefix[0]] = newChild
+			newFirstByte := newChild.prefix[0]
+			c.children[newFirstByte] = newChild
+			c.childCount++
 		}
 	}
+
+	n.updateDepth()
+}
+
+// updateDepth recalculates the max depth of this node's subtree
+func (n *RadixNode) updateDepth() {
+	maxChildDepth := 0
+	for i := 0; i < len(n.children); i++ {
+		child := n.children[i]
+		if child != nil && child.maxDepth > maxChildDepth {
+			maxChildDepth = child.maxDepth
+		}
+	}
+	if n.paramChild != nil && n.paramChild.maxDepth > maxChildDepth {
+		maxChildDepth = n.paramChild.maxDepth
+	}
+	if n.wildcardChild != nil && n.wildcardChild.maxDepth > maxChildDepth {
+		maxChildDepth = n.wildcardChild.maxDepth
+	}
+	n.maxDepth = maxChildDepth + 1
 }

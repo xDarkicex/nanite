@@ -166,7 +166,10 @@ func collectRoutesFromTree(method, path string, node *RadixNode, routes *[]Route
 	}
 
 	// Process regular children
-	for _, child := range node.children {
-		collectRoutesFromTree(method, currentPath, child, routes)
+	for i := 0; i < len(node.children); i++ {
+		child := node.children[i]
+		if child != nil {
+			collectRoutesFromTree(method, currentPath, child, routes)
+		}
 	}
 }
