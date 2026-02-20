@@ -138,7 +138,6 @@ func RegisterWithConfig(r *nanite.Router, path string, handler Handler, cfg Conf
 			cancel()
 			_ = conn.Close()
 			wg.Wait()
-			ctx.CleanupPooledResources()
 		}
 		defer cleanup()
 
