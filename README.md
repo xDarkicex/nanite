@@ -136,6 +136,26 @@ r.Get("/files/*path", func(c *nanite.Context) {
 })
 ```
 
+Named routes and reverse routing:
+
+```go
+r.NamedGet("users.show", "/users/:id", showUser)
+r.NamedGet("files.show", "/files/*path", showFile)
+
+userURL, _ := r.URL("users.show", map[string]string{"id": "42"})
+// /users/42
+
+fileURL, _ := r.URL("files.show", map[string]string{"path": "docs/report.pdf"})
+// /files/docs/report.pdf
+
+usersURL, _ := r.URLWithQuery(
+    "users.show",
+    map[string]string{"id": "42"},
+    map[string]string{"tab": "activity", "limit": "20"},
+)
+// /users/42?limit=20&tab=activity
+```
+
 ## Middleware
 
 ```go
@@ -164,6 +184,23 @@ r.Use(nanite.CORSMiddleware(&nanite.CORSConfig{
     AllowCredentials: true,
     MaxAge:           600,
 }))
+```
+
+## Security Middleware
+
+Rate limiting (opt-in):
+
+```go
+r.Use(nanite.RateLimitMiddleware(&nanite.RateLimitConfig{
+    Requests: 120,
+    Window:   time.Minute,
+}))
+```
+
+CSRF protection (opt-in):
+
+```go
+r.Use(nanite.CSRFMiddleware(nil))
 ```
 
 ## Validation
@@ -425,10 +462,11 @@ c.GetValue("user")
 - Hot path allocation reduction
 - Fluent middleware API
 - Enhanced parameter handling
-
-**Planned**
 - Named routes and reverse routing
 - CSRF and rate limiting middleware
+
+**Planned**
+- Method-not-allowed (405) + Allow header (opt-in)
 
 ## Contributing
 

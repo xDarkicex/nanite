@@ -170,6 +170,7 @@ type Router struct {
 	staticRoutes               map[string]map[string]staticRoute
 	trees                      map[string]*RadixNode
 	dynamicCounts              map[string]int
+	namedRoutes                map[string]namedRoute
 	routeCache                 *LRUCache
 	Pool                       sync.Pool // Exported for testing
 	middleware                 []MiddlewareFunc
@@ -189,6 +190,7 @@ func New(opts ...Option) *Router {
 		trees:         make(map[string]*RadixNode),
 		staticRoutes:  make(map[string]map[string]staticRoute),
 		dynamicCounts: make(map[string]int),
+		namedRoutes:   make(map[string]namedRoute),
 		groups:        make(map[string]*RouterGroup),
 		config: &Config{
 			RecoverPanics:        true,
