@@ -104,6 +104,10 @@ func RegisterWithConfig(r *nanite.Router, path string, handler Handler, cfg Conf
 			},
 		}
 	} else {
+		// Clone caller-provided upgrader to avoid mutating shared state.
+		upgraderCopy := *upgrader
+		upgrader = &upgraderCopy
+
 		if upgrader.ReadBufferSize == 0 {
 			upgrader.ReadBufferSize = conf.BufferSize
 		}

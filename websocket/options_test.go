@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/xDarkicex/nanite"
 )
 
 func TestNewConfigWithOptions(t *testing.T) {
@@ -40,5 +41,24 @@ func TestOptionsAffectOriginChecks(t *testing.T) {
 	reqDenied.Header.Set("Origin", "https://denied.example.com")
 	if checkOrigin(reqDenied, cfg.AllowedOrigins) {
 		t.Fatal("expected non-configured origin to be denied")
+	}
+}
+
+func TestRegisterWithConfigDoesNotMutateCallerUpgrader(t *testing.T) {
+	r := nanite.New()
+	original := &websocket.Upgrader{}
+
+	RegisterWithConfig(r, "/ws", func(*websocket.Conn, *nanite.Context) {}, Config{
+		Upgrader: original,
+	})
+
+	if original.ReadBufferSize != 0 {
+		t.Fatalf("expected caller upgrader ReadBufferSize unchanged, got %d", original.ReadBufferSize)
+	}
+	if original.WriteBufferSize != 0 {
+		t.Fatalf("expected caller upgrader WriteBufferSize unchanged, got %d", original.WriteBufferSize)
+	}
+	if original.CheckOrigin != nil {
+		t.Fatal("expected caller upgrader CheckOrigin to remain nil")
 	}
 }
