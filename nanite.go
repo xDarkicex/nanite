@@ -737,7 +737,8 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 	}
 
 	// Try parameter child
-	if n.paramChild != nil {
+	hasParamChild := n.paramChild != nil
+	if hasParamChild {
 		// Extract parameter value - check for invalid chars during extraction
 		i := 0
 		hasInvalidSlash := false
@@ -753,6 +754,7 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 
 		// Reject empty or invalid parameter values
 		if paramValue == "" || hasInvalidSlash {
+			// Parameter child exists but value is invalid - don't fall through to wildcard
 			return nil, nil
 		}
 
@@ -778,8 +780,9 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 		}
 	}
 
-	// Try wildcard as a last resort
-	if n.wildcardChild != nil {
+	// Try wildcard only if no parameter child exists
+	// Wildcard is a catch-all for paths that don't match any specific route
+	if n.wildcardChild != nil && !hasParamChild {
 		newParams := append(params, Param{Key: n.wildcardChild.wildcardName, Value: path})
 		return n.wildcardChild.handler, newParams
 	}
