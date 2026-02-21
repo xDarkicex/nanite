@@ -127,6 +127,7 @@ type RadixNode struct {
 	paramChild    *RadixNode
 	wildcardChild *RadixNode
 	paramName     string
+	paramSuffix   string
 	wildcardName  string
 	maxDepth      int // Track subtree depth for rebalancing
 }
@@ -857,7 +858,19 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 			return nil, nil
 		}
 
-		newParams := append(params, Param{Key: n.paramChild.paramName, Value: path[:i]})
+		paramValue := path[:i]
+		suffix := n.paramChild.paramSuffix
+		if suffix != "" {
+			if len(paramValue) <= len(suffix) || !strings.HasSuffix(paramValue, suffix) {
+				return nil, nil
+			}
+			paramValue = paramValue[:len(paramValue)-len(suffix)]
+		}
+		if paramValue == "" {
+			return nil, nil
+		}
+
+		newParams := append(params, Param{Key: n.paramChild.paramName, Value: paramValue})
 		if i == len(path) {
 			return n.paramChild.handler, newParams
 		}
@@ -888,22 +901,46 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 	if path[0] == ':' {
 		// Extract parameter name and remaining path
 		paramEnd := strings.IndexByte(path, '/')
-		var paramName, remainingPath string
+		var paramName, paramSuffix, remainingPath string
 
 		if paramEnd == -1 {
-			paramName = path[1:]
+			segment := path[1:]
+			if suffixStart := strings.IndexByte(segment, ':'); suffixStart != -1 {
+				paramName = segment[:suffixStart]
+				paramSuffix = segment[suffixStart:]
+			} else {
+				paramName = segment
+			}
 			remainingPath = ""
 		} else {
-			paramName = path[1:paramEnd]
+			segment := path[1:paramEnd]
+			if suffixStart := strings.IndexByte(segment, ':'); suffixStart != -1 {
+				paramName = segment[:suffixStart]
+				paramSuffix = segment[suffixStart:]
+			} else {
+				paramName = segment
+			}
 			remainingPath = path[paramEnd:]
+		}
+		if paramName == "" {
+			return
 		}
 
 		// Create parameter child if needed
 		if n.paramChild == nil {
 			n.paramChild = &RadixNode{
-				prefix:    ":" + paramName,
-				paramName: paramName,
+				prefix:      ":" + paramName + paramSuffix,
+				paramName:   paramName,
+				paramSuffix: paramSuffix,
 			}
+		} else if n.paramChild.paramName == "" {
+			n.paramChild.paramName = paramName
+			n.paramChild.paramSuffix = paramSuffix
+		}
+
+		if n.paramChild.paramName != paramName || n.paramChild.paramSuffix != paramSuffix {
+			// Preserve one-param-child semantics: conflicting param signatures at the same depth are not supported.
+			return
 		}
 
 		// Continue with remaining path
@@ -1006,6 +1043,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			paramChild:    c.paramChild,
 			wildcardChild: c.wildcardChild,
 			paramName:     c.paramName,
+			paramSuffix:   c.paramSuffix,
 			wildcardName:  c.wildcardName,
 			maxDepth:      c.maxDepth,
 		}
@@ -1018,6 +1056,7 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		c.paramChild = nil
 		c.wildcardChild = nil
 		c.paramName = ""
+		c.paramSuffix = ""
 		c.wildcardName = ""
 		c.maxDepth = 0
 

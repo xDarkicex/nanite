@@ -136,6 +136,15 @@ r.Get("/files/*path", func(c *nanite.Context) {
 })
 ```
 
+Google-style custom method suffix routes (AIP-136):
+
+```go
+r.Post("/v1/projects/:name:undelete", func(c *nanite.Context) {
+    name, _ := c.GetParam("name") // "proj123" from "/v1/projects/proj123:undelete"
+    c.String(http.StatusOK, name)
+})
+```
+
 Named routes and reverse routing:
 
 ```go
