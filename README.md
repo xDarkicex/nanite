@@ -143,6 +143,10 @@ r.Post("/v1/projects/:name:undelete", func(c *nanite.Context) {
     name, _ := c.GetParam("name") // "proj123" from "/v1/projects/proj123:undelete"
     c.String(http.StatusOK, name)
 })
+
+// Plain and suffixed params can coexist at the same depth.
+r.Post("/users/:id", plainHandler)
+r.Post("/users/:id:undelete", undeleteHandler)
 ```
 
 Named routes and reverse routing:

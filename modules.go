@@ -134,17 +134,22 @@ func collectRoutesFromTree(method, path string, node *RadixNode, routes *[]Route
 		})
 	}
 
-	// Process parameter child
-	if node.paramChild != nil {
-		paramPath := currentPath
-		if paramPath == "/" {
-			paramPath = "/:" + node.paramChild.paramName
-		} else if !strings.HasSuffix(paramPath, "/") {
-			paramPath = paramPath + "/:" + node.paramChild.paramName
-		} else {
-			paramPath = paramPath + ":" + node.paramChild.paramName
+	// Process parameter variants
+	for i := 0; i < node.paramCount; i++ {
+		paramNode := node.paramChildren[i]
+		if paramNode == nil {
+			continue
 		}
-		collectRoutesFromTree(method, paramPath, node.paramChild, routes)
+		paramPath := currentPath
+		paramSegment := ":" + paramNode.paramName + paramNode.paramSuffix
+		if paramPath == "/" {
+			paramPath = "/" + paramSegment
+		} else if !strings.HasSuffix(paramPath, "/") {
+			paramPath = paramPath + "/" + paramSegment
+		} else {
+			paramPath = paramPath + paramSegment
+		}
+		collectRoutesFromTree(method, paramPath, paramNode, routes)
 	}
 
 	// Process wildcard child

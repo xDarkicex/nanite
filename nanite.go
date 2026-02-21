@@ -116,6 +116,7 @@ type staticRoute struct {
 }
 
 const radixChildSlots = 256
+const paramVariantSlots = 4
 
 // RadixNode is an adaptive radix tree node optimized for HTTP routing.
 // Static children are addressed directly by first byte for O(1) lookup.
@@ -124,7 +125,8 @@ type RadixNode struct {
 	handler       HandlerFunc
 	children      [radixChildSlots]*RadixNode
 	childCount    int
-	paramChild    *RadixNode
+	paramChildren [paramVariantSlots]*RadixNode
+	paramCount    int
 	wildcardChild *RadixNode
 	paramName     string
 	paramSuffix   string
@@ -822,6 +824,20 @@ func (n *RadixNode) addChild(key byte, child *RadixNode) {
 	n.children[key] = child
 }
 
+func (n *RadixNode) hasParamVariants() bool {
+	return n.paramCount > 0
+}
+
+func (n *RadixNode) findParamVariant(paramName, paramSuffix string) *RadixNode {
+	for i := 0; i < n.paramCount; i++ {
+		child := n.paramChildren[i]
+		if child != nil && child.paramName == paramName && child.paramSuffix == paramSuffix {
+			return child
+		}
+	}
+	return nil
+}
+
 // findRoute searches for a route in the radix tree.
 func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param) {
 	// Base case: empty path
@@ -847,9 +863,9 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 		}
 	}
 
-	// Try parameter child.
-	hasParamChild := n.paramChild != nil
-	if hasParamChild {
+	// Try parameter variants.
+	hasParamVariants := n.hasParamVariants()
+	if hasParamVariants {
 		i := 0
 		for i < len(path) && path[i] != '/' {
 			i++
@@ -858,29 +874,71 @@ func (n *RadixNode) findRoute(path string, params []Param) (HandlerFunc, []Param
 			return nil, nil
 		}
 
-		paramValue := path[:i]
-		suffix := n.paramChild.paramSuffix
-		if suffix != "" {
-			if len(paramValue) <= len(suffix) || !strings.HasSuffix(paramValue, suffix) {
-				return nil, nil
-			}
-			paramValue = paramValue[:len(paramValue)-len(suffix)]
-		}
-		if paramValue == "" {
-			return nil, nil
+		paramSegment := path[:i]
+		hasRemaining := i < len(path)
+		var remainingPath string
+		if hasRemaining {
+			remainingPath = path[i+1:]
 		}
 
-		newParams := append(params, Param{Key: n.paramChild.paramName, Value: paramValue})
-		if i == len(path) {
-			return n.paramChild.handler, newParams
+		// Exact suffix matches first; longer suffixes win to avoid ambiguous overlap.
+		prevLen := len(paramSegment) + 1
+		for {
+			bestIdx := -1
+			bestLen := -1
+			for pi := 0; pi < n.paramCount; pi++ {
+				paramNode := n.paramChildren[pi]
+				if paramNode == nil || paramNode.paramSuffix == "" {
+					continue
+				}
+				suffixLen := len(paramNode.paramSuffix)
+				if suffixLen <= 0 || suffixLen >= len(paramSegment) || suffixLen >= prevLen {
+					continue
+				}
+				if strings.HasSuffix(paramSegment, paramNode.paramSuffix) && suffixLen > bestLen {
+					bestLen = suffixLen
+					bestIdx = pi
+				}
+			}
+			if bestIdx == -1 {
+				break
+			}
+
+			paramNode := n.paramChildren[bestIdx]
+			paramValue := paramSegment[:len(paramSegment)-len(paramNode.paramSuffix)]
+			if paramValue != "" {
+				newParams := append(params, Param{Key: paramNode.paramName, Value: paramValue})
+				if !hasRemaining {
+					if paramNode.handler != nil {
+						return paramNode.handler, newParams
+					}
+				} else if handler, subParams := paramNode.findRoute(remainingPath, newParams); handler != nil {
+					return handler, subParams
+				}
+			}
+			prevLen = bestLen
 		}
-		if handler, subParams := n.paramChild.findRoute(path[i+1:], newParams); handler != nil {
-			return handler, subParams
+
+		// Fallback to plain parameter variant (no suffix) if present.
+		for pi := 0; pi < n.paramCount; pi++ {
+			paramNode := n.paramChildren[pi]
+			if paramNode == nil || paramNode.paramSuffix != "" {
+				continue
+			}
+			newParams := append(params, Param{Key: paramNode.paramName, Value: paramSegment})
+			if !hasRemaining {
+				if paramNode.handler != nil {
+					return paramNode.handler, newParams
+				}
+			} else if handler, subParams := paramNode.findRoute(remainingPath, newParams); handler != nil {
+				return handler, subParams
+			}
+			break
 		}
 	}
 
-	// Wildcard only when no parameter child exists.
-	if n.wildcardChild != nil && !hasParamChild {
+	// Wildcard only when no parameter variants exist.
+	if n.wildcardChild != nil && !hasParamVariants {
 		newParams := append(params, Param{Key: n.wildcardChild.wildcardName, Value: path})
 		return n.wildcardChild.handler, newParams
 	}
@@ -926,28 +984,36 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			return
 		}
 
-		// Create parameter child if needed
-		if n.paramChild == nil {
-			n.paramChild = &RadixNode{
+		paramNode := n.findParamVariant(paramName, paramSuffix)
+		if paramNode == nil {
+			// Keep suffix unique at each depth to avoid ambiguous captures with different key names.
+			for i := 0; i < n.paramCount; i++ {
+				existing := n.paramChildren[i]
+				if existing != nil && existing.paramSuffix == paramSuffix && existing.paramName != paramName {
+					return
+				}
+			}
+			if n.paramCount >= paramVariantSlots {
+				return
+			}
+			paramNode = &RadixNode{
 				prefix:      ":" + paramName + paramSuffix,
 				paramName:   paramName,
 				paramSuffix: paramSuffix,
 			}
-		} else if n.paramChild.paramName == "" {
-			n.paramChild.paramName = paramName
-			n.paramChild.paramSuffix = paramSuffix
+			n.paramChildren[n.paramCount] = paramNode
+			n.paramCount++
 		}
 
-		if n.paramChild.paramName != paramName || n.paramChild.paramSuffix != paramSuffix {
-			// Preserve one-param-child semantics: conflicting param signatures at the same depth are not supported.
+		if paramNode.paramName != paramName || paramNode.paramSuffix != paramSuffix {
 			return
 		}
 
 		// Continue with remaining path
 		if remainingPath == "" {
-			n.paramChild.handler = handler
+			paramNode.handler = handler
 		} else {
-			n.paramChild.insertRoute(remainingPath, handler)
+			paramNode.insertRoute(remainingPath, handler)
 		}
 
 		n.updateDepth()
@@ -1040,7 +1106,8 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 			handler:       c.handler,
 			children:      c.children,
 			childCount:    c.childCount,
-			paramChild:    c.paramChild,
+			paramChildren: c.paramChildren,
+			paramCount:    c.paramCount,
 			wildcardChild: c.wildcardChild,
 			paramName:     c.paramName,
 			paramSuffix:   c.paramSuffix,
@@ -1053,7 +1120,8 @@ func (n *RadixNode) insertRoute(path string, handler HandlerFunc) {
 		c.handler = nil
 		c.children = [radixChildSlots]*RadixNode{}
 		c.childCount = 0
-		c.paramChild = nil
+		c.paramChildren = [paramVariantSlots]*RadixNode{}
+		c.paramCount = 0
 		c.wildcardChild = nil
 		c.paramName = ""
 		c.paramSuffix = ""
@@ -1103,8 +1171,11 @@ func (n *RadixNode) updateDepth() {
 		}
 	}
 
-	if n.paramChild != nil && n.paramChild.maxDepth > maxChildDepth {
-		maxChildDepth = n.paramChild.maxDepth
+	for i := 0; i < n.paramCount; i++ {
+		paramChild := n.paramChildren[i]
+		if paramChild != nil && paramChild.maxDepth > maxChildDepth {
+			maxChildDepth = paramChild.maxDepth
+		}
 	}
 	if n.wildcardChild != nil && n.wildcardChild.maxDepth > maxChildDepth {
 		maxChildDepth = n.wildcardChild.maxDepth
