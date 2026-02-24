@@ -145,28 +145,28 @@ func (g *RouterGroup) Use(middleware ...MiddlewareFunc) *RouterGroup {
 	return g
 }
 
-func (g *RouterGroup) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+func (g *RouterGroup) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := g.prefix + path
 	g.parent.addRoute("GET", fullPath, handler, append(g.middleware, middleware...)...)
-	return g
+	return &Route{method: "GET", path: fullPath, router: g.parent}
 }
 
-func (g *RouterGroup) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+func (g *RouterGroup) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := g.prefix + path
 	g.parent.addRoute("POST", fullPath, handler, append(g.middleware, middleware...)...)
-	return g
+	return &Route{method: "POST", path: fullPath, router: g.parent}
 }
 
-func (g *RouterGroup) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+func (g *RouterGroup) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := g.prefix + path
 	g.parent.addRoute("PUT", fullPath, handler, append(g.middleware, middleware...)...)
-	return g
+	return &Route{method: "PUT", path: fullPath, router: g.parent}
 }
 
-func (g *RouterGroup) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *RouterGroup {
+func (g *RouterGroup) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := g.prefix + path
 	g.parent.addRoute("DELETE", fullPath, handler, append(g.middleware, middleware...)...)
-	return g
+	return &Route{method: "DELETE", path: fullPath, router: g.parent}
 }
 
 type Router struct {
@@ -244,6 +244,10 @@ func New(opts ...Option) *Router {
 				current := ctx.middlewareChain[ctx.middlewareIndex]
 				ctx.middlewareIndex++
 				current(ctx, ctx.nextMiddleware)
+				// Check abort status after middleware executes
+				if ctx.aborted {
+					return
+				}
 				return
 			}
 
@@ -323,44 +327,44 @@ func (r *Router) Use(middleware ...MiddlewareFunc) {
 	r.middleware = append(r.middleware, middleware...)
 }
 
-func (r *Router) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("GET", path, handler, middleware...)
-	return r
+	return &Route{method: "GET", path: path, router: r}
 }
 
-func (r *Router) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("POST", path, handler, middleware...)
-	return r
+	return &Route{method: "POST", path: path, router: r}
 }
 
-func (r *Router) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("PUT", path, handler, middleware...)
-	return r
+	return &Route{method: "PUT", path: path, router: r}
 }
 
-func (r *Router) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("DELETE", path, handler, middleware...)
-	return r
+	return &Route{method: "DELETE", path: path, router: r}
 }
 
-func (r *Router) Patch(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Patch(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("PATCH", path, handler, middleware...)
-	return r
+	return &Route{method: "PATCH", path: path, router: r}
 }
 
-func (r *Router) Options(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Options(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("OPTIONS", path, handler, middleware...)
-	return r
+	return &Route{method: "OPTIONS", path: path, router: r}
 }
 
-func (r *Router) Head(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Head(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute("HEAD", path, handler, middleware...)
-	return r
+	return &Route{method: "HEAD", path: path, router: r}
 }
 
-func (r *Router) Handle(method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
+func (r *Router) Handle(method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	r.addRoute(method, path, handler, middleware...)
-	return r
+	return &Route{method: method, path: path, router: r}
 }
 
 func (r *Router) Start(port string) error {
@@ -370,8 +374,15 @@ func (r *Router) Start(port string) error {
 		return fmt.Errorf("server already running")
 	}
 	r.ensureConfigDefaults()
+	
+	// Parse address: if it contains :, use as-is; otherwise prepend :
+	addr := port
+	if !strings.Contains(port, ":") {
+		addr = ":" + port
+	}
+	
 	r.server = &http.Server{
-		Addr:           ":" + port,
+		Addr:           addr,
 		Handler:        r,
 		ReadTimeout:    r.config.ServerReadTimeout,
 		WriteTimeout:   r.config.ServerWriteTimeout,
@@ -416,8 +427,14 @@ func (r *Router) StartTLS(port, certFile, keyFile string) error {
 	}
 	r.ensureConfigDefaults()
 
+	// Parse address: if it contains :, use as-is; otherwise prepend :
+	addr := port
+	if !strings.Contains(port, ":") {
+		addr = ":" + port
+	}
+
 	r.server = &http.Server{
-		Addr:           ":" + port,
+		Addr:           addr,
 		Handler:        r,
 		ReadTimeout:    r.config.ServerReadTimeout,
 		WriteTimeout:   r.config.ServerWriteTimeout,
@@ -700,6 +717,15 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Execute the wrapped handler (already includes all middleware)
 	handler(ctx)
 
+	// If the request was aborted and no response was written, return 404
+	if ctx.IsAborted() && !trackedWriter.Written() {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
+		}
+	}
+
 	// Check if the context contains an error to be handled by error middleware
 	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
 		r.mutex.RLock()
@@ -712,13 +738,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			r.mutex.RUnlock()
 		} else if r.config.ErrorHandler != nil {
 			r.config.ErrorHandler(ctx, err)
-		}
-	} else if ctx.IsAborted() && !trackedWriter.Written() {
-		// Handle aborted requests that haven't written a response
-		if r.config.NotFoundHandler != nil {
-			r.config.NotFoundHandler(ctx)
-		} else {
-			writeDefaultNotFound(trackedWriter)
 		}
 	}
 
@@ -772,6 +791,16 @@ func (r *Router) serveHTTPNoRecover(w http.ResponseWriter, req *http.Request) {
 
 	handler(ctx)
 
+	// If the request was aborted and no response was written, return 404
+	if ctx.IsAborted() && !trackedWriter.Written() {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
+		}
+	}
+
+	// Handle errors if no response was written yet
 	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
 		r.mutex.RLock()
 		hasErrorMiddleware := len(r.errorMiddleware) > 0
@@ -783,12 +812,6 @@ func (r *Router) serveHTTPNoRecover(w http.ResponseWriter, req *http.Request) {
 			r.mutex.RUnlock()
 		} else if r.config.ErrorHandler != nil {
 			r.config.ErrorHandler(ctx, err)
-		}
-	} else if ctx.IsAborted() && !trackedWriter.Written() {
-		if r.config.NotFoundHandler != nil {
-			r.config.NotFoundHandler(ctx)
-		} else {
-			writeDefaultNotFound(trackedWriter)
 		}
 	}
 

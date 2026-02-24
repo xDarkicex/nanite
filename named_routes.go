@@ -25,43 +25,6 @@ type namedRoute struct {
 	segments []routeSegment
 }
 
-// HandleNamed registers a route and stores metadata for reverse URL generation.
-func (r *Router) HandleNamed(name, method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	if err := r.registerNamedRoute(name, method, path); err != nil {
-		panic(err)
-	}
-	r.addRoute(method, path, handler, middleware...)
-	return r
-}
-
-func (r *Router) NamedGet(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "GET", path, handler, middleware...)
-}
-
-func (r *Router) NamedPost(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "POST", path, handler, middleware...)
-}
-
-func (r *Router) NamedPut(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "PUT", path, handler, middleware...)
-}
-
-func (r *Router) NamedDelete(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "DELETE", path, handler, middleware...)
-}
-
-func (r *Router) NamedPatch(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "PATCH", path, handler, middleware...)
-}
-
-func (r *Router) NamedOptions(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "OPTIONS", path, handler, middleware...)
-}
-
-func (r *Router) NamedHead(name, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Router {
-	return r.HandleNamed(name, "HEAD", path, handler, middleware...)
-}
-
 // URL resolves a named route into a concrete path.
 // params keys should match route placeholders (":id" => "id", "*path" => "path").
 func (r *Router) URL(name string, params map[string]string) (string, error) {

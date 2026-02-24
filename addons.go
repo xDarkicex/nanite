@@ -27,60 +27,52 @@ func (r *Router) Group(prefix string, middleware ...MiddlewareFunc) *Group {
 	}
 }
 
-func (g *Group) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Get(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Get(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Get(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Post(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Post(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Post(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Put(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Put(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Put(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Delete(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Delete(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Delete(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Patch(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Patch(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Patch(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Patch(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Options(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Options(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Options(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Options(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Head(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Head(path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Head(fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Head(fullPath, handler, allMiddleware...)
 }
 
-func (g *Group) Handle(method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Group {
+func (g *Group) Handle(method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) *Route {
 	fullPath := normalizePath(g.prefix + path)
 	allMiddleware := append(g.middleware, middleware...)
-	g.router.Handle(method, fullPath, handler, allMiddleware...)
-	return g
+	return g.router.Handle(method, fullPath, handler, allMiddleware...)
 }
 
 func (g *Group) Group(prefix string, middleware ...MiddlewareFunc) *Group {

@@ -12,7 +12,7 @@ import (
 type responseWriter struct {
 	http.ResponseWriter      // Embedded interface
 	status              int  // Tracks HTTP status code
-	written             int  // Tracks total bytes written
+	written             int64 // Tracks total bytes written
 	headerWritten       bool // Tracks if headers were flushed
 }
 
@@ -31,7 +31,7 @@ func (w *responseWriter) Write(data []byte) (int, error) {
 		w.WriteHeader(http.StatusOK) // Default 200 if not set
 	}
 	n, err := w.ResponseWriter.Write(data)
-	w.written += n
+	w.written += int64(n)
 	return n, err
 }
 
@@ -41,7 +41,7 @@ func (w *responseWriter) Status() int {
 }
 
 // Written returns the total number of bytes written to the client
-func (w *responseWriter) Written() int {
+func (w *responseWriter) Written() int64 {
 	return w.written
 }
 
@@ -58,12 +58,23 @@ func (c *Context) IsWritten() bool {
 	return c.Writer.(interface{ Header() http.Header }).Header().Get("X-Is-Written") == "true"
 }
 
-func (c *Context) WrittenBytes() int {
-	if rw, ok := c.Writer.(interface{ Written() int }); ok {
+func (c *Context) WrittenBytes() int64 {
+	if rw, ok := c.Writer.(interface{ Written() int64 }); ok {
 		return rw.Written()
 	}
 	return 0
 }
+
+func (c *Context) GetStatus() int {
+	if rw, ok := c.Writer.(interface{ Status() int }); ok {
+		return rw.Status()
+	}
+	return 0
+}
+
+// GetStatus returns the HTTP response status code that was set.
+// Returns 0 if called before a response method (JSON, String, HTML, Status, etc.) has been invoked.
+// In logging middleware, always call GetStatus() after next() to get the actual status code.
 
 //go:inline
 func (c *Context) Set(key string, value interface{}) {
@@ -119,12 +130,13 @@ func (c *Context) GetParam(key string) (string, bool) {
 	return "", false
 }
 
-// MustParam retrieves a required route parameter or returns an error.
-func (c *Context) MustParam(key string) (string, error) {
+// MustParam retrieves a required route parameter or panics if missing or empty.
+// This follows Go convention where Must* functions panic on failure.
+func (c *Context) MustParam(key string) string {
 	if val, ok := c.GetParam(key); ok && val != "" {
-		return val, nil
+		return val
 	}
-	return "", fmt.Errorf("required parameter %s missing or empty", key)
+	panic(fmt.Sprintf("nanite: required parameter %q missing or empty", key))
 }
 
 // File retrieves a file from the request's multipart form.
@@ -208,6 +220,12 @@ func (c *Context) Cookie(name, value string, options ...interface{}) {
 			}
 		}
 	}
+	http.SetCookie(c.Writer, cookie)
+}
+
+// SetCookie sets a cookie on the response with full control over all cookie properties.
+// This is the recommended method for setting cookies with security flags (HttpOnly, Secure, SameSite).
+func (c *Context) SetCookie(cookie *http.Cookie) {
 	http.SetCookie(c.Writer, cookie)
 }
 

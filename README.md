@@ -152,8 +152,8 @@ r.Post("/users/:id:undelete", undeleteHandler)
 Named routes and reverse routing:
 
 ```go
-r.NamedGet("users.show", "/users/:id", showUser)
-r.NamedGet("files.show", "/files/*path", showFile)
+r.Get("/users/:id", showUser).Name("users.show")
+r.Get("/files/*path", showFile).Name("files.show")
 
 userURL, _ := r.URL("users.show", map[string]string{"id": "42"})
 // /users/42

@@ -7,9 +7,9 @@ import (
 
 func TestNamedRoutesURLGeneration(t *testing.T) {
 	r := New()
-	r.NamedGet("user.show", "/users/:id", func(c *Context) {
+	r.Get("/users/:id", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("user.show")
 
 	url, err := r.URL("user.show", map[string]string{"id": "123"})
 	if err != nil {
@@ -30,9 +30,9 @@ func TestNamedRoutesURLGeneration(t *testing.T) {
 
 func TestNamedRoutesWildcardURLGeneration(t *testing.T) {
 	r := New()
-	r.NamedGet("files.show", "/files/*path", func(c *Context) {
+	r.Get("/files/*path", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("files.show")
 
 	url, err := r.URL("files.show", map[string]string{"path": "docs/report.pdf"})
 	if err != nil {
@@ -45,9 +45,9 @@ func TestNamedRoutesWildcardURLGeneration(t *testing.T) {
 
 func TestNamedRoutesErrors(t *testing.T) {
 	r := New()
-	r.NamedGet("user.show", "/users/:id", func(c *Context) {
+	r.Get("/users/:id", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("user.show")
 
 	if _, err := r.URL("missing", nil); err == nil {
 		t.Fatal("expected missing route error")
@@ -60,9 +60,9 @@ func TestNamedRoutesErrors(t *testing.T) {
 
 func TestNamedRouteDuplicatePanics(t *testing.T) {
 	r := New()
-	r.NamedGet("dup", "/a", func(c *Context) {
+	r.Get("/a", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("dup")
 
 	defer func() {
 		if recover() == nil {
@@ -70,16 +70,16 @@ func TestNamedRouteDuplicatePanics(t *testing.T) {
 		}
 	}()
 
-	r.NamedGet("dup", "/b", func(c *Context) {
+	r.Get("/b", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("dup")
 }
 
 func TestMustURLPanics(t *testing.T) {
 	r := New()
-	r.NamedGet("user.show", "/users/:id", func(c *Context) {
+	r.Get("/users/:id", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("user.show")
 
 	defer func() {
 		if recover() == nil {
@@ -91,9 +91,9 @@ func TestMustURLPanics(t *testing.T) {
 
 func TestURLWithQuery(t *testing.T) {
 	r := New()
-	r.NamedGet("users.show", "/users/:id", func(c *Context) {
+	r.Get("/users/:id", func(c *Context) {
 		c.String(http.StatusOK, "ok")
-	})
+	}).Name("users.show")
 
 	url, err := r.URLWithQuery("users.show", map[string]string{"id": "42"}, map[string]string{
 		"sort":  "desc",
