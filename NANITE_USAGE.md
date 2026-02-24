@@ -1290,38 +1290,194 @@ WithUpgrader(upgrader *websocket.Upgrader) Option
 **Note**: `*websocket.Conn` methods like `ReadMessage()`, `WriteMessage()`, `IsCloseError()`, and message type constants come from gorilla/websocket. For advanced usage, consult the [gorilla/websocket documentation](https://pkg.go.dev/github.com/gorilla/websocket).
 
 ### HTTP/3 QUIC (nanite/quic)
+
+The `nanite/quic` module provides HTTP/3 support using the QUIC protocol. It can run HTTP/3 only or in dual-stack mode alongside HTTP/1.1.
+
+**Basic HTTP/3 Server**:
 ```go
-import "github.com/xDarkicex/nanite/quic"
+import nanitequic "github.com/xDarkicex/nanite/quic"
 
-// Config struct
-cfg := quic.Config{
-    Addr: ":8443",                    // UDP port for HTTP/3
-    CertFile: "cert.pem",             // TLS certificate file
-    KeyFile: "key.pem",               // TLS key file
-    TLSConfig: nil,                   // Optional prebuilt TLS config
-    QUICConfig: nil,                  // Optional QUIC transport tuning
-    HTTP1Addr: ":8080",               // Optional HTTP/1.1 fallback address
-    HTTP1ReadTimeout: 5 * time.Second,
-    HTTP1ReadHeaderTimeout: 5 * time.Second,
-    HTTP1WriteTimeout: 60 * time.Second,
-    HTTP1IdleTimeout: 60 * time.Second,
-    HTTP1MaxHeaderBytes: 1 << 20,
-    HTTP1DisableKeepAlives: false,
-    Logger: nil,                      // Optional structured logging
-}
-
-s := quic.New(r, cfg)
+r := nanite.New()
+r.Get("/healthz", func(c *nanite.Context) {
+    c.String(http.StatusOK, "ok")
+})
 
 // HTTP/3 only
-s.StartHTTP3()
+qs := nanitequic.New(r, nanitequic.Config{
+    Addr:     ":8443",
+    CertFile: "server.crt",
+    KeyFile:  "server.key",
+})
 
-// Or HTTP/1.1 + HTTP/3 dual-stack
-s.StartDualAndServe()
-
-// Shutdown
-s.Shutdown(ctx)           // With context
-s.ShutdownGraceful(5 * time.Second)  // With timeout
+if err := qs.StartHTTP3(); err != nil {
+    panic(err)
+}
 ```
+
+**Dual-Stack Server (HTTP/1.1 + HTTP/3)**:
+```go
+// Serves HTTP/1.1 on TCP and HTTP/3 on UDP
+qs := nanitequic.New(r, nanitequic.Config{
+    Addr:      ":8443", // UDP port for HTTP/3
+    HTTP1Addr: ":8080", // TCP port for HTTP/1.1
+    CertFile:  "server.crt",
+    KeyFile:   "server.key",
+    HTTP1ReadHeaderTimeout: 2 * time.Second,
+    HTTP1MaxHeaderBytes:    1 << 20,
+})
+
+if err := qs.StartDualAndServe(); err != nil {
+    panic(err)
+}
+```
+
+**Configuration Options**:
+```go
+cfg := nanitequic.Config{
+    // HTTP/3 settings
+    Addr:       ":8443",              // UDP port for HTTP/3
+    CertFile:   "cert.pem",           // TLS certificate file
+    KeyFile:    "key.pem",            // TLS key file
+    TLSConfig:  nil,                  // Optional prebuilt TLS config
+    QUICConfig: nil,                  // Optional QUIC transport tuning
+    
+    // HTTP/1.1 fallback settings (for dual-stack)
+    HTTP1Addr:              ":8080",           // TCP port for HTTP/1.1
+    HTTP1ReadTimeout:       5 * time.Second,
+    HTTP1ReadHeaderTimeout: 5 * time.Second,
+    HTTP1WriteTimeout:      60 * time.Second,
+    HTTP1IdleTimeout:       60 * time.Second,
+    HTTP1MaxHeaderBytes:    1 << 20,
+    HTTP1DisableKeepAlives: false,
+    
+    // Logging
+    Logger: func(e nanitequic.Event) {
+        // e.Component: h1|h3|server
+        // e.Status: started|stopped|error
+        // e.Addr, e.Err, e.Time available
+    },
+}
+```
+
+**Alt-Svc Header Middleware**:
+Advertises HTTP/3 availability to clients:
+```go
+r.Use(nanitequic.AltSvcNaniteMiddleware(nanitequic.AltSvcConfig{
+    UDPPort: 8443,
+    MaxAge:  300, // seconds
+}))
+```
+
+**Helper Functions**:
+```go
+// Router-first helper for HTTP/3 only
+err := nanitequic.StartRouterHTTP3(r, nanitequic.Config{
+    Addr:     ":8443",
+    CertFile: "server.crt",
+    KeyFile:  "server.key",
+})
+
+// Router-first helper for dual-stack
+err := nanitequic.StartRouterDual(r, nanitequic.Config{
+    Addr:      ":8443",
+    HTTP1Addr: ":8080",
+    CertFile:  "server.crt",
+    KeyFile:   "server.key",
+})
+
+// Validate TLS files before starting
+if err := nanitequic.ValidateTLSFiles("server.crt", "server.key"); err != nil {
+    panic(err)
+}
+
+// Load TLS config for reuse
+tlsCfg, err := nanitequic.LoadTLSConfig("server.crt", "server.key", nil)
+```
+
+**Graceful Shutdown**:
+```go
+// With timeout
+if err := qs.ShutdownGraceful(5 * time.Second); err != nil {
+    log.Printf("shutdown error: %v", err)
+}
+
+// With context
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+if err := qs.Shutdown(ctx); err != nil {
+    log.Printf("shutdown error: %v", err)
+}
+```
+
+**Complete Dual-Stack Example**:
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/xDarkicex/nanite"
+    nanitequic "github.com/xDarkicex/nanite/quic"
+)
+
+func main() {
+    r := nanite.New()
+    
+    // Advertise HTTP/3 availability
+    r.Use(nanitequic.AltSvcNaniteMiddleware(nanitequic.AltSvcConfig{
+        UDPPort: 8443,
+        MaxAge:  300,
+    }))
+    
+    r.Get("/healthz", func(c *nanite.Context) {
+        c.String(http.StatusOK, "ok")
+    })
+
+    qs := nanitequic.NewRouterServer(r, nanitequic.Config{
+        Addr:                   ":8443", // HTTP/3 over UDP
+        HTTP1Addr:              ":8080", // HTTP/1.1+2 over TCP
+        CertFile:               "server.crt",
+        KeyFile:                "server.key",
+        HTTP1ReadHeaderTimeout: 2 * time.Second,
+        HTTP1MaxHeaderBytes:    1 << 20,
+    })
+
+    go func() {
+        if err := qs.StartDualAndServe(); err != nil {
+            log.Fatalf("dual-stack server failed: %v", err)
+        }
+    }()
+
+    // Wait for interrupt signal
+    sig := make(chan os.Signal, 1)
+    signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+    <-sig
+
+    // Graceful shutdown
+    if err := qs.ShutdownGraceful(5 * time.Second); err != nil {
+        log.Printf("shutdown error: %v", err)
+    }
+}
+```
+
+**Production Considerations**:
+- **UDP Load Balancer**: HTTP/3 requires UDP routing. Ensure your load balancer supports UDP and preserves client source addresses for QUIC.
+- **Firewall Rules**: Open both TCP (for HTTP/1.1+2 fallback) and UDP (for HTTP/3), typically on the same public port.
+- **Certificate Rotation**: Rotate cert/key files atomically and restart gracefully. For advanced rotation, provide `TLSConfig` with dynamic cert loading.
+- **Alt-Svc Rollout**: Start with low `MaxAge` (60-300s), verify client telemetry, then increase to longer cache durations.
+- **Mixed Clients**: Keep dual-stack enabled during rollout since some clients or networks block UDP/QUIC.
+- **QUIC Tuning**: Use `QUICConfig` to tune idle timeouts, max streams, and buffer sizes for your workload.
+
+**Methods**:
+- `StartHTTP3()` - Start HTTP/3 only server
+- `StartDualAndServe()` - Start both HTTP/1.1 and HTTP/3 servers
+- `Shutdown(ctx)` - Graceful shutdown with context
+- `ShutdownGraceful(timeout)` - Graceful shutdown with timeout
 
 ## Performance Notes
 
