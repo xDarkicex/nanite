@@ -326,6 +326,25 @@ if raw, exists := c.Get("body"); exists {
 - `FormValue()` - Access **form data** (from POST/PUT body with `application/x-www-form-urlencoded` or `multipart/form-data`)
 - `Bind()` - Access **JSON body** (from POST/PUT body with `application/json`)
 
+### Direct HTTP Access
+
+For advanced use cases, you can access the underlying HTTP objects directly:
+
+```go
+// Access the raw http.ResponseWriter
+c.Writer.Header().Set("X-Custom-Header", "value")
+c.Writer.WriteHeader(http.StatusOK)
+c.Writer.Write([]byte("raw response"))
+
+// Access the raw *http.Request
+method := c.Request.Method
+url := c.Request.URL
+headers := c.Request.Header
+body := c.Request.Body
+```
+
+**Note**: When using `c.Writer` directly, you bypass Nanite's response tracking. Use the Context response methods (JSON, String, HTML, etc.) for most cases as they integrate with middleware and error handling.
+
 ### Safe Parameter Access Patterns
 
 **Option 1: Check and handle (recommended for user input)**
@@ -1160,6 +1179,7 @@ c.GetStatus() int           // Returns int (HTTP status code, 0 if not set)
 
 ### Context
 - **Handler signature**: `func(*Context)`
+- **Direct access**: Writer (http.ResponseWriter), Request (*http.Request)
 - **Access request data**: GetParam, MustParam, GetIntParam, GetFloatParam, GetBoolParam, GetUintParam, GetStringParamOrDefault, Query, FormValue, File, Bind
 - **Send responses**: JSON, String, HTML, SetHeader, Status, Redirect, Cookie, SetCookie
 - **Response introspection**: GetStatus, IsWritten, WrittenBytes

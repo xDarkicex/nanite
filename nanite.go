@@ -717,16 +717,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Execute the wrapped handler (already includes all middleware)
 	handler(ctx)
 
-	// If the request was aborted and no response was written, return 404
-	if ctx.IsAborted() && !trackedWriter.Written() {
-		if r.config.NotFoundHandler != nil {
-			r.config.NotFoundHandler(ctx)
-		} else {
-			writeDefaultNotFound(trackedWriter)
-		}
-	}
-
 	// Check if the context contains an error to be handled by error middleware
+	// This must be checked BEFORE the abort check, because c.Error() calls c.Abort()
 	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
 		r.mutex.RLock()
 		hasErrorMiddleware := len(r.errorMiddleware) > 0
@@ -738,6 +730,16 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			r.mutex.RUnlock()
 		} else if r.config.ErrorHandler != nil {
 			r.config.ErrorHandler(ctx, err)
+		}
+	}
+
+	// If the request was aborted and no response was written, return 404
+	// This check comes after error handling because c.Error() also aborts
+	if ctx.IsAborted() && !trackedWriter.Written() {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
 		}
 	}
 
@@ -791,16 +793,8 @@ func (r *Router) serveHTTPNoRecover(w http.ResponseWriter, req *http.Request) {
 
 	handler(ctx)
 
-	// If the request was aborted and no response was written, return 404
-	if ctx.IsAborted() && !trackedWriter.Written() {
-		if r.config.NotFoundHandler != nil {
-			r.config.NotFoundHandler(ctx)
-		} else {
-			writeDefaultNotFound(trackedWriter)
-		}
-	}
-
 	// Handle errors if no response was written yet
+	// This must be checked BEFORE the abort check, because c.Error() calls c.Abort()
 	if err := ctx.GetError(); err != nil && !trackedWriter.Written() {
 		r.mutex.RLock()
 		hasErrorMiddleware := len(r.errorMiddleware) > 0
@@ -812,6 +806,16 @@ func (r *Router) serveHTTPNoRecover(w http.ResponseWriter, req *http.Request) {
 			r.mutex.RUnlock()
 		} else if r.config.ErrorHandler != nil {
 			r.config.ErrorHandler(ctx, err)
+		}
+	}
+
+	// If the request was aborted and no response was written, return 404
+	// This check comes after error handling because c.Error() also aborts
+	if ctx.IsAborted() && !trackedWriter.Written() {
+		if r.config.NotFoundHandler != nil {
+			r.config.NotFoundHandler(ctx)
+		} else {
+			writeDefaultNotFound(trackedWriter)
 		}
 	}
 
