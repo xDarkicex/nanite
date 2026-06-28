@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -145,6 +146,19 @@ func (s *Server) StartHTTP3() error {
 	s.emit("h3", "started", s.cfg.Addr, nil)
 	err := s.h3.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
 	return s.handleServeResult("h3", s.cfg.Addr, err)
+}
+
+// ServeH1 serves HTTP/1.x over a pre-created listener. Use this when you
+// need to wrap the listener (e.g. rate limiting before TLS).
+func (s *Server) ServeH1(ln net.Listener) error {
+	s.emit("h1", "started", ln.Addr().String(), nil)
+	var err error
+	if s.h1TLS != nil {
+		s.h1.TLSConfig = s.h1TLS
+		ln = tls.NewListener(ln, s.h1TLS)
+	}
+	err = s.h1.Serve(ln)
+	return s.handleServeResult("h1", ln.Addr().String(), err)
 }
 
 // StartDual starts optional HTTP/1 fallback and HTTP/3 on QUIC.
