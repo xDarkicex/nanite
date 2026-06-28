@@ -148,6 +148,12 @@ func (s *Server) StartHTTP3() error {
 	return s.handleServeResult("h3", s.cfg.Addr, err)
 }
 
+// HTTP1Addr returns the configured HTTP/1.x address.
+func (s *Server) HTTP1Addr() string { return s.cfg.HTTP1Addr }
+
+// Addr returns the configured HTTP/3 address.
+func (s *Server) Addr() string { return s.cfg.Addr }
+
 // ServeH1 serves HTTP/1.x over a pre-created listener. Use this when you
 // need to wrap the listener (e.g. rate limiting before TLS).
 func (s *Server) ServeH1(ln net.Listener) error {
