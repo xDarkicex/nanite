@@ -116,10 +116,13 @@ func New(handler http.Handler, cfg Config) *Server {
 		}
 
 		if cfg.TLSConfig != nil {
-			s.h1TLS = cfg.TLSConfig
+			h1Cfg := cfg.TLSConfig.Clone()
+			h1Cfg.NextProtos = appendH1Protos(h1Cfg.NextProtos)
+			s.h1TLS = h1Cfg
 		} else if cfg.CertFile != "" && cfg.KeyFile != "" {
 			tlsCfg, err := LoadTLSConfig(cfg.CertFile, cfg.KeyFile, nil)
 			if err == nil {
+				tlsCfg.NextProtos = appendH1Protos(tlsCfg.NextProtos)
 				s.h1TLS = tlsCfg
 			}
 		}
@@ -237,6 +240,21 @@ func (s *Server) emit(component, status, addr string, err error) {
 		Addr:      addr,
 		Err:       err,
 	})
+}
+
+func appendH1Protos(protos []string) []string {
+	out := make([]string, 0, len(protos)+2)
+	for _, p := range protos {
+		if p != "h3" {
+			out = append(out, p)
+		}
+	}
+	for _, want := range []string{"h2", "http/1.1"} {
+		if !hasProto(out, want) {
+			out = append(out, want)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleServeResult(component, addr string, err error) error {
