@@ -54,8 +54,9 @@ type Server struct {
 	handler http.Handler
 	cfg     Config
 
-	h3 *http3.Server
-	h1 *http.Server
+	h3     *http3.Server
+	h1     *http.Server
+	h1TLS  *tls.Config
 }
 
 // Event carries structured lifecycle signals for observability hooks.
@@ -113,6 +114,15 @@ func New(handler http.Handler, cfg Config) *Server {
 			IdleTimeout:       cfg.HTTP1IdleTimeout,
 			MaxHeaderBytes:    cfg.HTTP1MaxHeaderBytes,
 		}
+
+		if cfg.TLSConfig != nil {
+			s.h1TLS = cfg.TLSConfig
+		} else if cfg.CertFile != "" && cfg.KeyFile != "" {
+			tlsCfg, err := LoadTLSConfig(cfg.CertFile, cfg.KeyFile, nil)
+			if err == nil {
+				s.h1TLS = tlsCfg
+			}
+		}
 	}
 
 	return s
@@ -154,7 +164,13 @@ func (s *Server) StartDualAndServe() error {
 
 	go func() {
 		s.emit("h1", "started", s.cfg.HTTP1Addr, nil)
-		err := s.h1.ListenAndServe()
+		var err error
+		if s.h1TLS != nil {
+			s.h1.TLSConfig = s.h1TLS
+			err = s.h1.ListenAndServeTLS("", "")
+		} else {
+			err = s.h1.ListenAndServe()
+		}
 		errCh <- s.handleServeResult("h1", s.cfg.HTTP1Addr, err)
 	}()
 
