@@ -4,14 +4,9 @@ go 1.25.7
 
 require (
 	github.com/quic-go/quic-go v0.60.0
-	github.com/xDarkicex/memory v1.0.37
-	github.com/xDarkicex/nanite v0.0.0
-	github.com/xDarkicex/nanite/quic v0.0.0-00010101000000-000000000000
-)
-
-replace (
-	github.com/xDarkicex/nanite => ../
-	github.com/xDarkicex/nanite/quic => ../quic
+	github.com/xDarkicex/memory v1.2.8
+	github.com/xDarkicex/nanite v0.5.7
+	github.com/xDarkicex/nanite/quic v0.0.1
 )
 
 require (
