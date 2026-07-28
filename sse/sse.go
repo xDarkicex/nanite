@@ -25,7 +25,7 @@ func init() {
 	cfg := memory.DefaultFreeListConfig()
 	cfg.SlotSize = 4096
 	var err error
-	fl, err = memory.NewFreeList(cfg)
+	fl, err = memory.NewFreeList(cfg, 64)
 	if err != nil {
 		panic(err)
 	}
