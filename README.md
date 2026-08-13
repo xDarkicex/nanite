@@ -10,7 +10,7 @@ A lightweight, high-performance HTTP router for Go. Designed to be developer-fri
 
 ### Microbenchmarks
 
-`go test ./benchmark -benchmem`, Apple M2, Go 1.25.1:
+`go test ./benchmark -benchmem`, Apple M2, Go 1.25.7:
 
 **net/http comparison**
 
@@ -35,8 +35,8 @@ Nanite achieves zero allocations on both static and param routes.
 
 | Module | Throughput | ns/op | B/op | allocs/op |
 |---|---|---|---|---|
-| **nanite/sse** (Sequential) | **~754,000 frames/s** | **~1326** | **~110** | **6*** |
-| **nanite/sse** (Concurrent) | **~1,330,000 frames/s** | **~1060** | **~95** | **5*** |
+| **nanite/sse** (Sequential) | **~786,000 frames/s** | **~1272** | **~111** | **6*** |
+| **nanite/sse** (Concurrent) | **~1,198,000 frames/s** | **~835** | **~94** | **5*** |
 
 > *The 6 allocations per operation originate entirely from the underlying `quic-go/http3` ResponseWriter processing the byte stream. The `nanite/sse` connection object's `Send()` method itself successfully utilizes off-heap arenas and performs exactly **zero** Go heap allocations.
 

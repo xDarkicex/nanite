@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/quic-go/quic-go v0.60.0
-	github.com/xDarkicex/memory v1.2.8
+	github.com/xDarkicex/memory v1.2.9
 	github.com/xDarkicex/nanite v0.5.7
 	github.com/xDarkicex/nanite/quic v0.0.1
 )

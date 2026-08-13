@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,7 +74,7 @@ func TestTimingWheel(t *testing.T) {
 
 	conn := &Connection{}
 	tw.add(conn)
-	
+
 	if conn.wheelSlot < 0 || conn.wheelSlot >= tw.size {
 		t.Errorf("expected valid slot, got %d", conn.wheelSlot)
 	}
@@ -86,14 +87,113 @@ func TestTimingWheel(t *testing.T) {
 
 func TestTimingWheelTick(t *testing.T) {
 	tw := newTimingWheel(1 * time.Second)
-	
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := &nanite.Context{Writer: rec, Request: req}
 	conn := &Connection{ctx: ctx}
-	
+
 	tw.add(conn)
-	tw.tick() 
+	tw.tick()
+}
+
+func TestConnectionStopsAfterRequestCancellation(t *testing.T) {
+	reqContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(reqContext)
+	ctx := &nanite.Context{Writer: rec, Request: req}
+	conn := &Connection{ctx: ctx, wheelSlot: -1}
+
+	cancel()
+	if err := conn.SendBytes([]byte("test")); err == nil {
+		t.Fatal("expected canceled request to stop SSE writes")
+	}
+}
+
+func TestHubRemovesConnectionAfterWritePanic(t *testing.T) {
+	h := &Hub{
+		connections: make(map[*Connection]struct{}),
+		wheel:       newTimingWheel(time.Second),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := &nanite.Context{Writer: panicResponseWriter{}, Request: req}
+	conn := &Connection{ctx: ctx, wheelSlot: -1}
+
+	h.Register(conn)
+	h.tick()
+
+	h.mu.RLock()
+	_, registered := h.connections[conn]
+	h.mu.RUnlock()
+	if registered {
+		t.Fatal("expected a failed SSE write to unregister the connection")
+	}
+}
+
+func TestHubDoesNotRequeueUnregisteredConnection(t *testing.T) {
+	h := &Hub{
+		connections: make(map[*Connection]struct{}),
+		wheel:       newTimingWheel(time.Second),
+	}
+	w := newBlockingResponseWriter()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := &nanite.Context{Writer: w, Request: req}
+	conn := &Connection{ctx: ctx, wheelSlot: -1}
+	h.Register(conn)
+
+	tickDone := make(chan struct{})
+	go func() {
+		h.tick()
+		close(tickDone)
+	}()
+	<-w.started
+
+	unregisterDone := make(chan struct{})
+	go func() {
+		h.Unregister(conn)
+		close(unregisterDone)
+	}()
+
+	deadline := time.After(time.Second)
+	for conn.state.Load()&connectionClosed == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out starting connection close")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(w.release)
+
+	select {
+	case <-tickDone:
+	case <-time.After(time.Second):
+		t.Fatal("timing wheel tick did not finish")
+	}
+	select {
+	case <-unregisterDone:
+	case <-time.After(time.Second):
+		t.Fatal("connection unregister did not finish")
+	}
+
+	h.mu.RLock()
+	_, registered := h.connections[conn]
+	h.mu.RUnlock()
+	if registered {
+		t.Fatal("connection remained registered after unregister")
+	}
+
+	h.wheel.mu.Lock()
+	defer h.wheel.mu.Unlock()
+	for _, slot := range h.wheel.slots {
+		for _, scheduled := range slot {
+			if scheduled == conn {
+				t.Fatal("unregistered connection was requeued")
+			}
+		}
+	}
 }
 
 func TestDefaultConfig(t *testing.T) {
@@ -186,9 +286,44 @@ func TestStringToBytes(t *testing.T) {
 	if string(b) != "hello" {
 		t.Errorf("expected hello, got %s", string(b))
 	}
-	
+
 	empty := StringToBytes("")
 	if empty != nil {
 		t.Error("expected nil for empty string")
 	}
 }
+
+type panicResponseWriter struct{}
+
+func (panicResponseWriter) Header() http.Header { return make(http.Header) }
+
+func (panicResponseWriter) WriteHeader(int) {}
+
+func (panicResponseWriter) Write([]byte) (int, error) { panic("write after hijack") }
+
+func (panicResponseWriter) Flush() {}
+
+type blockingResponseWriter struct {
+	mu      sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func newBlockingResponseWriter() *blockingResponseWriter {
+	return &blockingResponseWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (w *blockingResponseWriter) Header() http.Header { return make(http.Header) }
+
+func (w *blockingResponseWriter) WriteHeader(int) {}
+
+func (w *blockingResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Do(func() { close(w.started) })
+	<-w.release
+	return len(p), nil
+}
+
+func (w *blockingResponseWriter) Flush() {}
